@@ -1,0 +1,21 @@
+# 统一换行符为 LF（跨平台，避免 Windows CRLF 提交噪声）
+* text=auto
+*.py text eol=lf
+*.bat text eol=crlf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+
+# 二进制文件不做换行符转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pth binary
+*.pkl binary
+*.onnx binary
+*.ttc binary
+*.exe binary
+*.dll binary

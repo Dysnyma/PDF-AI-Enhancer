@@ -1,0 +1,63 @@
+# ============================================================
+# 扫描版 PDF AI 画质增强工具 — 配置
+# 所有路径相对于项目根目录；AI 后端均可替换
+# ============================================================
+
+render:
+  dpi: auto           # auto | 数字。auto=按每页内嵌扫描图的名义 DPI 零插值渲染
+                      # （例：1439px 扫描图以 72dpi 名义平铺的书 → 渲染 72，一输出像素
+                      # 对一源像素；固定 300 会造成 300/72=4.2x 无意义插值放大）。
+                      # 矢量页（无内嵌图）回退 300。CLI: --dpi auto | --dpi 300
+  max_dpi: 450        # auto 模式的渲染上限（防超高清扫描把 SR 输入/显存撑爆）
+
+preprocess:
+  enabled: true
+  deskew: true        # 倾斜校正（phase 2 预留）
+  denoise: light      # light | off
+
+document_restoration:
+  enabled: true
+  backend: docres     # docres | none
+  task: appearance    # appearance | deshadowing | deblurring
+  max_size: 1024      # 大页推理分辨率（光照图为低频信息，1024 足够；OOM 自动降）
+  # weights: docres.pkl   # 可选：覆盖默认权重文件名（相对 models/）
+
+super_resolution:
+  enabled: true
+  backend: realesrgan-general   # realesrgan-general | swinir | none
+  scale: 2            # 2 | 4（x4 模型内部处理后按需降采样，保证文字边缘干净）
+  tile: 384           # 分块推理尺寸，OOM 时自动缩小
+  # routing: off | by-type
+  #   off     —— 单一 backend（上面的 backend 字段），全本统一
+  #   by-type —— 按页类型混合路由：文字/文档页用 realesrgan-general（无偏色），
+  #             照片/插图页用 swinir（自然图像画质更高）。粗分类在 DocRes 后、
+  #             SR 前做（光照不均已消除，判据可靠），解决"SR 在分类前"的依赖。
+  # routing: off
+  # weights: realesr-general-x4v3.pth   # 可选：覆盖默认权重文件名
+  # --- swinir 后端说明（--model swinir 切换）---
+  # SwinIR-M real-SR（约 64MB，自然图像场景画质更高）：
+  #   * 建议 tile: 128（transformer 注意力大，fp32 下 tile=128 峰值仅 ~0.3GB）
+  #   * 强制 fp32（fp16 输出全零，已实测）
+  #   * 注意：BSRGAN 自然图像训练导致白底文档页整页偏橙，
+  #     适合照片/插图页；文字页请用 realesrgan-general（默认）
+  #   * 速度约慢 10 倍（150DPI 下 ~33s/页 vs ~3s/页）
+
+ocr:
+  enabled: true       # RapidOCR 隐藏文字层（Windows 原生，PDF 可 Ctrl+F 搜索）
+  backend: rapidocr   # rapidocr | none
+  lang: ch            # ch | en（ch 模型同时支持中英数字混合）
+  dpi: 200            # OCR 渲染 DPI（独立于增强渲染，坐标直接映射原页）
+  use_cuda: false     # CPU 已足够（约 2s/页）；true 需 onnxruntime-gpu
+
+compression:
+  color: jpeg         # jpeg | jp2(可选)
+  grayscale: jpeg
+  monochrome: 1bit    # 黑白文字页编码：1bit(默认,无损安全) | jbig2(更小但有符号合并幻觉风险,MuPDF无法预览)
+  jpeg_quality: 85
+
+gpu:
+  device: auto        # auto | cuda | cpu
+  fp16: true
+
+debug:
+  keep_temp: false    # 保留 temp/<书名>/ 中间页图（全本 x4 时每页 ~10MB，注意磁盘）

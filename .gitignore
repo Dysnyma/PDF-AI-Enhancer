@@ -1,0 +1,39 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === 虚拟环境（4.5GB，绝不提交）===
+env/
+.venv/
+venv/
+
+# === 模型权重（超 100MB，需另行下载）===
+models/
+!models/.gitkeep
+
+# === 输入/输出/中间产物 ===
+input/
+!input/.gitkeep
+output/
+!output/.gitkeep
+temp/
+cache/
+logs/
+*.log
+
+# === 第三方可执行程序（jbig2.exe 等，需自行准备）===
+tools/jbig2/
+tools/fonts/
+
+# === IDE / 系统 ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# === 项目数据 ===
+.workbuddy/
