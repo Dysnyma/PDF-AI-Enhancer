@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 
 from src.classify import _color_mask
+from src.imgio import imread_unicode, imwrite_unicode
 
 log = logging.getLogger("pdfenhance")
 
@@ -78,14 +79,14 @@ def _threshold_mask(gray: np.ndarray, jbig2_bin: str | None,
         src = os.path.join(workdir, f"_mrc_in_{os.getpid()}.png")
         dst = os.path.join(workdir, f"_mrc_thr_{os.getpid()}.png")
         try:
-            cv2.imwrite(src, gray)
+            imwrite_unicode(src, gray)
             # -O dumps the thresholded image; jbig2enc also prints the raw
             # JBIG2 generic stream to stdout, so silence it.
             subprocess.run(
                 [os.path.abspath(jbig2_bin), "-O", os.path.abspath(dst),
                  os.path.abspath(src)],
                 check=True, capture_output=True, timeout=180)
-            thr = cv2.imread(dst, cv2.IMREAD_GRAYSCALE)
+            thr = imread_unicode(dst, cv2.IMREAD_GRAYSCALE)
             if thr is not None and thr.shape == gray.shape:
                 return thr < 128
             log.warning("jbig2enc threshold dump missing/mismatched; "

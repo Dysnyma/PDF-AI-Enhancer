@@ -1,11 +1,14 @@
 """PDF rendering and rebuilding via PyMuPDF."""
 import logging
 import os
+import time
 import zlib
 
 import cv2
 import pymupdf as fitz  # PyMuPDF
 import numpy as np
+
+from src.imgio import imread_unicode
 
 log = logging.getLogger("pdfenhance")
 
@@ -36,60 +39,123 @@ def _page_nominal_dpi(page) -> float:
     return best
 
 
+def _page_dpi(page, dpi, max_dpi: int) -> int:
+    """""auto" -> the embedded scan's own nominal DPI, clamped to [72, max_dpi].
+
+    Vector pages (no raster at all) keep the classic 300 DPI default.
+    """
+    if isinstance(dpi, str) and dpi.lower() == "auto":
+        nominal = _page_nominal_dpi(page)
+        if nominal <= 0:
+            return 300
+        return int(min(max(nominal, 72.0), float(max_dpi)))
+    return int(dpi)
+
+
+def _render_one(doc, i: int, dpi, max_dpi: int) -> dict:
+    """Render a single page to BGR. Returns {index, image, width_pt, height_pt, dpi}."""
+    page = doc[i]
+    page_dpi = _page_dpi(page, dpi, max_dpi)
+    zoom = page_dpi / 72.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom),
+                          colorspace=fitz.csRGB, alpha=False)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return {
+        "index": i,
+        "image": img,
+        "width_pt": page.rect.width,
+        "height_pt": page.rect.height,
+        "dpi": page_dpi,
+    }
+
+
+def _page_indexes(doc, page_range):
+    if page_range is None:
+        return range(doc.page_count)
+    start, end = page_range
+    start = max(0, int(start))
+    end = min(doc.page_count - 1, int(end))
+    return range(start, end + 1)
+
+
+class PdfPages:
+    """Lazy, one-page-at-a-time access to a PDF's rendered pages.
+
+    Rendering a whole book up front costs ~9 MB per page in raw BGR even at
+    72 DPI (340 pages ≈ 3 GB) and the *enhanced* pages are roughly four times
+    that again after a 2x super-resolution pass — holding both lists means a
+    full book peaks around 15 GB, and a 4x run cannot fit in memory at all.
+    Callers that process pages independently (the pipeline, which checkpoints
+    each page to disk anyway) should render on demand instead:
+
+        with PdfPages(pdf, dpi, max_dpi, page_range) as pages:
+            for i in pages.indexes:
+                p = pages.render(i)      # one page in memory at a time
+
+    ``geometry(i)`` returns the page's point size without rendering, so a
+    resumed run can rebuild a cached page without paying for the render.
+    """
+
+    def __init__(self, pdf_path: str, dpi=300, max_dpi: int = 450,
+                 page_range: tuple[int, int] | None = None):
+        self.pdf_path = pdf_path
+        self._doc = fitz.open(pdf_path)
+        self._dpi = dpi
+        self._max_dpi = int(max_dpi)
+        self.indexes = list(_page_indexes(self._doc, page_range))
+        self._dpi_stats: dict[int, int] = {}
+        self._rendered = 0
+
+    def geometry(self, i: int) -> tuple[float, float]:
+        r = self._doc[i].rect
+        return r.width, r.height
+
+    def render(self, i: int) -> dict:
+        p = _render_one(self._doc, i, self._dpi, self._max_dpi)
+        self._dpi_stats[p["dpi"]] = self._dpi_stats.get(p["dpi"], 0) + 1
+        self._rendered += 1
+        return p
+
+    def log_stats(self):
+        if not self._rendered:
+            return
+        if isinstance(self._dpi, str) and self._dpi.lower() == "auto":
+            log.info("rendered %d/%d pages @ auto DPI %s from %s",
+                     self._rendered, len(self.indexes),
+                     dict(sorted(self._dpi_stats.items())), self.pdf_path)
+        else:
+            log.info("rendered %d/%d pages @ %d DPI from %s",
+                     self._rendered, len(self.indexes), self._dpi, self.pdf_path)
+
+    def close(self):
+        try:
+            self._doc.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 def render_pdf_pages(pdf_path: str, dpi=300, max_dpi: int = 450,
                      page_range: tuple[int, int] | None = None):
-    """Render pages of a PDF to BGR numpy arrays.
+    """Render ALL pages of a PDF to BGR arrays at once (list of page dicts).
 
-    dpi: int, or "auto" — per page, render at the embedded scan's own nominal
-    DPI (zero interpolation: one output pixel per scan pixel), clamped to
-    [72, max_dpi]. Vector pages without raster images fall back to 300.
-
-    page_range: optional (start, end) inclusive 0-based page indexes; when
-    given, only those pages are rendered (end clamped to the last page).
+    Convenience wrapper kept for the diagnostic/benchmark scripts, which only
+    ever work on a handful of pages. The pipeline uses :class:`PdfPages`
+    instead so it never holds a whole book in memory.
 
     Returns list of dicts: {index, image (BGR ndarray), width_pt, height_pt, dpi}
     """
-    doc = fitz.open(pdf_path)
-    auto = isinstance(dpi, str) and dpi.lower() == "auto"
-    pages = []
-    dpi_stats: dict[int, int] = {}
-    if page_range is not None:
-        start, end = page_range
-        start = max(0, int(start))
-        end = min(doc.page_count - 1, int(end))
-        idxs = range(start, end + 1)
-    else:
-        idxs = range(doc.page_count)
-    for i in idxs:
-        page = doc[i]
-        if auto:
-            nominal = _page_nominal_dpi(page)
-            if nominal <= 0:
-                page_dpi = 300  # vector page: keep the classic default
-            else:
-                page_dpi = int(min(max(nominal, 72.0), float(max_dpi)))
-        else:
-            page_dpi = int(dpi)
-        zoom = page_dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        pages.append({
-            "index": i,
-            "image": img,
-            "width_pt": page.rect.width,
-            "height_pt": page.rect.height,
-            "dpi": page_dpi,
-        })
-        dpi_stats[page_dpi] = dpi_stats.get(page_dpi, 0) + 1
-    doc.close()
-    if auto:
-        log.info("rendered %d pages @ auto DPI %s from %s",
-                 len(pages), dict(sorted(dpi_stats.items())), pdf_path)
-    else:
-        log.info("rendered %d pages @ %d DPI from %s", len(pages), dpi, pdf_path)
-    return pages
+    with PdfPages(pdf_path, dpi, max_dpi, page_range) as pages:
+        out = [pages.render(i) for i in pages.indexes]
+        pages.log_stats()
+    return out
 
 
 def encode_page_image(img_bgr: np.ndarray, page_type: str, jpeg_quality: int) -> bytes:
@@ -110,6 +176,30 @@ def encode_page_image(img_bgr: np.ndarray, page_type: str, jpeg_quality: int) ->
     return buf.tobytes()
 
 
+def _replace_with_retry(src: str, dst: str, attempts: int = 6) -> bool:
+    """os.replace with backoff, because Windows hands out transient locks.
+
+    The freshly written PDF is ~10-300 MB and real-time antivirus scanning
+    opens it immediately; os.replace then fails with WinError 5 ("access
+    denied") for a moment even though nothing of ours holds the file. This
+    used to silently abort font subsetting, so every searchable PDF shipped
+    with the whole 18 MB SimSun embedded (a 2-page test came out at 9.9 MB
+    instead of 177 KB).
+    """
+    delay = 0.15
+    for k in range(attempts):
+        try:
+            os.replace(src, dst)
+            return True
+        except OSError as e:
+            if k == attempts - 1:
+                log.warning("could not replace %s -> %s (%s)", src, dst, e)
+                return False
+            time.sleep(delay)
+            delay = min(delay * 2, 1.5)
+    return False
+
+
 def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
                 text_layers: dict[int, list[dict]] | None = None,
                 font_file: str | None = None,
@@ -118,7 +208,10 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
                 mrc_bg_scale="auto", mrc_bg_denoise="auto"):
     """Build a new PDF from processed page images.
 
-    pages: list of dicts with keys image (BGR), width_pt, height_pt, ptype.
+    pages: list of dicts with keys width_pt, height_pt, ptype and EITHER
+      image (BGR ndarray) OR image_path (a file to load it from). The path
+      form lets the pipeline rebuild a checkpointed book one page at a time
+      instead of holding every enhanced page in memory at once.
     monochrome: "1bit" (default) or "jbig2" — encoding for bw-text pages.
       jbig2 is EXPERIMENTAL: PyMuPDF strips the /JBIG2Decode filter on save
       (MuPDF has no JBIG2 support), which corrupts the page (renders all
@@ -145,10 +238,15 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
     workdir = os.path.dirname(out_path)
     for p in pages:
         ptype = p.get("ptype", "color")
+        img = p.get("image")
+        if img is None:
+            img = imread_unicode(p["image_path"])
+            if img is None:
+                raise RuntimeError(f"cannot read page image {p['image_path']}")
         page = doc.new_page(width=p["width_pt"], height=p["height_pt"])
 
         if ptype == "bw-text":
-            gray = cv2.cvtColor(p["image"], cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             if monochrome == "jbig2" and jbig2_bin and os.path.isfile(jbig2_bin):
                 try:
                     sym, jb2, w, h = encode_jbig2(gray, jbig2_bin, workdir)
@@ -175,11 +273,11 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
             denoise = mrc_bg_denoise
             if denoise == "auto":
                 denoise = 5 if ptype == "gray-text" else 0
-            mrc = encode_mrc(p["image"], jpeg_quality,
+            mrc = encode_mrc(img, jpeg_quality,
                              bg_gray=(ptype == "gray-text"),
                              jbig2_bin=jbig2_bin, workdir=workdir,
                              bg_scale=int(scale), bg_denoise=int(denoise))
-            jpg = encode_page_image(p["image"], ptype, jpeg_quality)
+            jpg = encode_page_image(img, ptype, jpeg_quality)
             if mrc[0] is not None and mrc[1]:
                 z_est = sum(len(zlib.compress(pk, 6)) for pk, _ in mrc[1])
                 if len(mrc[0]) + z_est < len(jpg):
@@ -190,14 +288,17 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
             else:
                 page.insert_image(page.rect, stream=jpg)
         else:
-            jpg = encode_page_image(p["image"], ptype, jpeg_quality)
+            jpg = encode_page_image(img, ptype, jpeg_quality)
             page.insert_image(page.rect, stream=jpg)
 
         if text_layers and p["index"] in text_layers:
             insert_hidden_text_layer(page, text_layers[p["index"]], font_file)
 
+        del img  # release the page array before rendering the next one
+
     doc.save(out_path, deflate=True, garbage=3)
     doc.close()
+    before = os.path.getsize(out_path)
     from src.mrc import cleanup_threshold_files
     cleanup_threshold_files(workdir)
 
@@ -238,7 +339,14 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
             d2.subset_fonts()
             d2.save(out_path + ".subset.pdf", deflate=True, garbage=3)
             d2.close()
-            os.replace(out_path + ".subset.pdf", out_path)
+            if _replace_with_retry(out_path + ".subset.pdf", out_path):
+                log.info("font subset applied: %d bytes released",
+                         max(0, before - os.path.getsize(out_path)))
+            else:
+                log.warning(
+                    "font subsetting could not be installed (file locked); "
+                    "the PDF keeps the full embedded font — re-run "
+                    "--rebuild-only, which reuses the page checkpoint")
         except Exception as e:
             log.warning("font subsetting failed (%s); keeping full font", e)
 

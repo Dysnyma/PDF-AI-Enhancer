@@ -228,14 +228,16 @@ class _JobLogHandler(logging.Handler):
         job.append_log(msg)
         import re
         try:
-            if msg.startswith("render:"):
+            if msg.startswith(("render:", "plan:")):
                 job.stage = "render"
             if "OCR pass" in msg:
                 job.stage = "ocr"
             m = re.search(r"page (\d+) OCR", msg)
             if m and job.total_pages:
                 job.stage = "ocr"
-                frac = min(1.0, int(m.group(1)) / job.total_pages)
+                # page numbers in the log are absolute (1-based); the range
+                # may start later than page 1.
+                frac = min(1.0, (int(m.group(1)) - job.page_start) / job.total_pages)
                 job.progress = max(job.progress, 0.03 + 0.22 * frac)
             m = re.search(r"page (\d+) \[", msg)
             if m:
@@ -327,7 +329,8 @@ def _run_job(job: Job):
         if job._stop.is_set():
             job.status = "stopped"
             job.stage = "stopped"
-            job.append_log("已手动停止")
+            job.append_log("已手动停止 —— 已完成的页面存在断点缓存里，"
+                           "再次开始本任务会从断点续跑")
             return
 
         out_size = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
@@ -348,7 +351,8 @@ def _run_job(job: Job):
     except Cancelled:
         job.status = "stopped"
         job.stage = "stopped"
-        job.append_log("已手动停止")
+        job.append_log("已手动停止 —— 已完成的页面存在断点缓存里，"
+                       "再次开始本任务会从断点续跑")
     except Exception as e:
         job.status = "error"
         job.error = str(e)

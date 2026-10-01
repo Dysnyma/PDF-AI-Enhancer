@@ -28,6 +28,8 @@ import cv2
 import numpy as np
 import pymupdf as fitz
 
+from src.imgio import imwrite_unicode
+
 log = logging.getLogger("pdfenhance")
 
 JBIG2_HEADER_LEN = 27
@@ -59,7 +61,9 @@ def encode_jbig2(img_gray: np.ndarray, jbig2_bin: str,
     bw = binarize(img_gray)
     png_path = os.path.abspath(os.path.join(workdir, "page_bw.png"))
     base = os.path.abspath(os.path.join(workdir, "page"))
-    cv2.imwrite(png_path, bw)
+    # Unicode-safe write: the workdir derives from the book name, and
+    # cv2.imwrite cannot open non-ASCII paths on Windows.
+    imwrite_unicode(png_path, bw)
 
     # -s symbol mode (text); no -r refinement (crashes Acrobat).
     cmd = [os.path.abspath(jbig2_bin), "-s", "-p", "-t", str(threshold),

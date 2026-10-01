@@ -43,7 +43,11 @@ super_resolution:
   #   * 速度约慢 10 倍（150DPI 下 ~33s/页 vs ~3s/页）
 
 ocr:
-  enabled: true       # RapidOCR 隐藏文字层（Windows 原生，PDF 可 Ctrl+F 搜索）
+  enabled: false      # RapidOCR 隐藏文字层（Windows 原生，PDF 可 Ctrl+F 搜索）
+                      # 默认关闭：本项目专注图像增强，文字层建议交给 ABBYY 等专业
+                      # 工具。CLI 用 --ocr 打开（GUI 高级面板里同样默认关）。
+                      # 打开后 340 页约多 11 分钟；识别结果也会进断点缓存，
+                      # 重跑不会重复支付这份开销。
   backend: rapidocr   # rapidocr | none
   lang: ch            # ch | en（ch 模型同时支持中英数字混合）
   dpi: 200            # OCR 渲染 DPI（独立于增强渲染，坐标直接映射原页）
@@ -73,3 +77,9 @@ gpu:
 
 debug:
   keep_temp: false    # 保留 temp/<书名>/ 中间页图（全本 x4 时每页 ~10MB，注意磁盘）
+  keep_checkpoint: true
+                      # 保留 temp/<书名>/ckpt/ 断点缓存（增强后的页图 + 元数据）。
+                      # 一次中断的长任务可续跑；压缩参数调优时可用 --rebuild-only
+                      # 直接从缓存重建（分钟级），不必重跑整本（小时级）。
+                      # 备注：这是无损 PNG，整本 340 页约 4~6GB；不需要时删掉
+                      # temp/<书名>/ckpt/ 或用 --clear-checkpoint。

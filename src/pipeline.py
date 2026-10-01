@@ -1,16 +1,23 @@
-"""Pipeline orchestration: render -> classify -> restore -> SR -> rebuild."""
+"""Pipeline orchestration: render -> classify -> restore -> SR -> rebuild.
+
+Pages are processed one at a time and each finished page is written to a
+checkpoint (see :mod:`src.checkpoint`), so an interrupted run resumes
+instead of starting over, and the peak memory footprint stays at a single
+page rather than a whole book.
+"""
 import logging
 import os
+import shutil
 import time
-
-import cv2
 
 from src.backends import available_backends
 from src.backends.base import resolve_weights
+from src.checkpoint import (OcrStore, PageStore, SpansView, clear_checkpoints,
+                            human_size)
 from src.classify import classify_page, coarse_type
-from src.render import render_pdf_pages, rebuild_pdf
 from src.ocr import (RapidOCRBackend, boxes_to_pdf_text,
                      render_page_for_ocr)
+from src.render import PdfPages, rebuild_pdf
 
 log = logging.getLogger("pdfenhance")
 
@@ -20,8 +27,14 @@ class Cancelled(Exception):
 
     The caller passes ``should_stop`` (a zero-arg callable) to ``process_pdf``;
     the pipeline checks it between pages and aborts early so a long全本 run can
-    be stopped from the GUI without killing the process.
+    be stopped from the GUI without killing the process. Every page finished
+    so far is already in the checkpoint, so the next run continues from there.
     """
+
+
+def _check_stop(should_stop):
+    if should_stop is not None and should_stop():
+        raise Cancelled()
 
 
 def _build_stage_backend(registry, name, project_root, stage_cfg, device, fp16):
@@ -122,100 +135,173 @@ class EnhancePipeline:
             free, total = self.torch.cuda.mem_get_info(0)
             log.info("VRAM before run: %.1f GB free / %.1f GB", free / 1024**3, total / 1024**3)
 
+    # ------------------------------------------------------------------
     def process_pdf(self, pdf_path: str, out_path: str,
                     save_images_dir: str | None = None,
                     page_range: tuple[int, int] | None = None,
-                    should_stop=None):
+                    should_stop=None,
+                    resume: bool = True,
+                    rebuild_only: bool = False,
+                    clear_checkpoint: bool = False):
+        """Enhance one PDF.
+
+        resume: reuse pages already finished by an earlier (interrupted) run
+          instead of reprocessing them. Finished pages are checkpointed to
+          ``temp/<book>/ckpt/`` as they complete.
+        rebuild_only: skip enhancement entirely and rebuild the PDF from the
+          checkpoint. Fails loudly if any page is missing, so it can never
+          silently emit a partial document. This turns "re-tune the MRC
+          encoder and look at the result" from ~104 minutes into minutes.
+        clear_checkpoint: wipe every checkpoint of this book first.
+        """
         cfg = self.cfg
         t0 = time.time()
-        pages = render_pdf_pages(pdf_path, cfg["render"].get("dpi", 300),
-                                 int(cfg["render"].get("max_dpi", 450)),
-                                 page_range=page_range)
-        log.info("render: %d pages ready", len(pages))
+        book = os.path.splitext(os.path.basename(pdf_path))[0]
+        ckpt_root = os.path.join(self.project_root, "temp", book, "ckpt")
+
+        if clear_checkpoint:
+            clear_checkpoints(ckpt_root)
+            log.info("checkpoint cleared for %s", book)
+
+        store = PageStore(ckpt_root, pdf_path, cfg, page_range, use_cache=resume)
+        log.info("checkpoint: %s", store.dir)
+
+        ocr_store = None
+        if self.ocr is not None and not rebuild_only:
+            ocr_store = OcrStore(ckpt_root, pdf_path, cfg, page_range,
+                                 self.ocr_dpi, use_cache=resume)
+        elif self.ocr is not None and rebuild_only:
+            # A rebuild still wants the hidden text layer: attach to the
+            # existing OCR checkpoint instead of creating a new one.
+            ocr_store = OcrStore(ckpt_root, pdf_path, cfg, page_range,
+                                 self.ocr_dpi, use_cache=True)
+
+        cached = store.count() if resume else 0
+        if cached:
+            log.info("resume: %d page(s) already enhanced (%s on disk)",
+                     cached, human_size(store.dir_size()))
 
         temp_dir = None
         if cfg.get("debug", {}).get("keep_temp", False):
-            temp_dir = os.path.join(self.project_root, "temp",
-                                    os.path.splitext(os.path.basename(pdf_path))[0])
+            temp_dir = os.path.join(self.project_root, "temp", book)
             os.makedirs(temp_dir, exist_ok=True)
 
-        out_pages = []
-        text_layers: dict[int, list[dict]] = {}
-        n_pages = len(pages)
+        with PdfPages(pdf_path, cfg["render"].get("dpi", 300),
+                      int(cfg["render"].get("max_dpi", 450)),
+                      page_range=page_range) as pages:
+            total = len(pages.indexes)
+            log.info("plan: %d page(s), %d cached, %d to enhance",
+                     total, cached, total - cached)
 
-        # --- OCR pass (hidden text layer, on original pages @ ocr_dpi) ---
-        if self.ocr is not None:
-            log.info("OCR pass @ %d DPI (%d pages)", self.ocr_dpi, n_pages)
-            t_ocr = time.time()
-            for p in pages:
-                if should_stop is not None and should_stop():
-                    raise Cancelled()
-                i = p["index"]
-                img, zoom = render_page_for_ocr(pdf_path, i, self.ocr_dpi)
-                boxes = self.ocr.recognize(img)
-                text_layers[i] = boxes_to_pdf_text(boxes, zoom)
-                log.info("page %d OCR: %d spans", i + 1, len(boxes))
-            log.info("OCR done in %.1fs", time.time() - t_ocr)
+            # --- OCR pass (hidden text layer, on original pages @ ocr_dpi) ---
+            if ocr_store is not None and not rebuild_only:
+                todo = [i for i in pages.indexes if not ocr_store.has(i)]
+                if todo:
+                    log.info("OCR pass @ %d DPI (%d page(s), %d cached)",
+                             self.ocr_dpi, len(todo), total - len(todo))
+                    t_ocr = time.time()
+                    for i in todo:
+                        _check_stop(should_stop)
+                        img, zoom = render_page_for_ocr(pdf_path, i, self.ocr_dpi)
+                        boxes = self.ocr.recognize(img)
+                        del img
+                        ocr_store.save(i, boxes_to_pdf_text(boxes, zoom))
+                        log.info("page %d OCR: %d spans", i + 1, len(boxes))
+                    log.info("OCR done in %.1fs", time.time() - t_ocr)
+                else:
+                    log.info("OCR pass: all %d page(s) cached", total)
 
-        for p in pages:
-            if should_stop is not None and should_stop():
-                raise Cancelled()
-            i = p["index"]
-            img = p["image"]
-            t_page = time.time()
+            # --- enhancement pass (one page in memory at a time) ---
+            out_pages = []
+            missing = []
+            for i in pages.indexes:
+                _check_stop(should_stop)
+                t_page = time.time()
 
-            img = self.restore.process(img)
+                if store.has(i):
+                    out_pages.append(self._cached_entry(store, i))
+                    if not rebuild_only:
+                        log.info("page %d [%s] cached, skipped",
+                                 i + 1, store.meta(i)["ptype"])
+                    continue
 
-            # Mixed SR routing: pick the SR backend by coarse page type
-            # (photo/figure -> SwinIR, text -> RealESRGAN). The coarse signal
-            # is computed on the *restored* (pre-SR) image, where DocRes has
-            # already removed the illumination gradient that would otherwise
-            # corrupt the text-vs-image decision.
-            routed = None
-            if self.routing == "by-type":
-                ctype = coarse_type(img)
-                sr = self.sr_image if ctype == "image" else self.sr
-                routed = f"{'swinir' if ctype == 'image' else 'realesrgan'}"
-                img = sr.process(img)
-            else:
-                img = self.sr.process(img)
+                if rebuild_only:
+                    missing.append(i + 1)
+                    continue
 
-            # Classify on the *enhanced* image: restoration removes the
-            # illumination gradient that would otherwise make a BW text page
-            # look gray, so the binarization decision is only reliable here.
-            info = classify_page(img)
-            ptype = info["type"]
+                p = pages.render(i)
+                img = p["image"]
+                img = self.restore.process(img)
 
-            if temp_dir:
-                cv2.imwrite(os.path.join(temp_dir, f"page_{i:04d}_{ptype}.png"), img)
+                # Mixed SR routing picks the backend by coarse page type
+                # (photo/figure -> SwinIR, text -> RealESRGAN). The coarse
+                # signal is computed on the *restored* (pre-SR) image, where
+                # DocRes has already removed the illumination gradient that
+                # would otherwise corrupt the text-vs-image decision.
+                routed = None
+                if self.routing == "by-type":
+                    ctype = coarse_type(img)
+                    sr = self.sr_image if ctype == "image" else self.sr
+                    routed = "swinir" if ctype == "image" else "realesrgan"
+                    img = sr.process(img)
+                else:
+                    img = self.sr.process(img)
 
-            out_pages.append({
-                "index": i,
-                "image": img,
-                "width_pt": p["width_pt"],
-                "height_pt": p["height_pt"],
-                "ptype": ptype,
-            })
-            log.info("page %d [%s%s] done in %.1fs (color=%.3f text=%.3f)",
-                     i + 1, ptype,
-                     f" <- {routed}" if routed else "",
-                     time.time() - t_page,
-                     info["color_ratio"], info["text_ratio"])
+                # Classify on the *enhanced* image: restoration removes the
+                # illumination gradient that would otherwise make a BW text
+                # page look gray, so the binarization decision is only
+                # reliable here.
+                info = classify_page(img)
+                ptype = info["type"]
 
+                store.save(i, img, ptype, p["width_pt"], p["height_pt"], p["dpi"])
+
+                if temp_dir:
+                    self._link_or_copy(store.image_path(i),
+                                       os.path.join(temp_dir,
+                                                    f"page_{i:04d}_{ptype}.png"))
+
+                out_pages.append({
+                    "index": i,
+                    "image_path": store.image_path(i),
+                    "ptype": ptype,
+                    "width_pt": p["width_pt"],
+                    "height_pt": p["height_pt"],
+                })
+                log.info("page %d [%s%s] done in %.1fs (color=%.3f text=%.3f)",
+                         i + 1, ptype,
+                         f" <- {routed}" if routed else "",
+                         time.time() - t_page,
+                         info["color_ratio"], info["text_ratio"])
+                del img, p  # keep exactly one page in memory
+
+            pages.log_stats()
+
+            if rebuild_only and missing:
+                head = ", ".join(str(n) for n in missing[:10])
+                more = "" if len(missing) <= 10 else f" ... (+{len(missing) - 10})"
+                raise RuntimeError(
+                    f"rebuild-only: {len(missing)} page(s) not in the checkpoint "
+                    f"(pages {head}{more}). Run the full pipeline once "
+                    f"(without --rebuild-only) to produce them.")
+
+        # --- rebuild ---
         q = int(cfg["compression"].get("jpeg_quality", 85))
         mono = cfg["compression"].get("monochrome", "1bit")
         bg_scale = cfg["compression"].get("mrc_bg_scale", "auto")
         bg_denoise = cfg["compression"].get("mrc_bg_denoise", "auto")
         jbig2_bin = os.path.join(self.project_root, "tools", "jbig2", "jbig2.exe")
+        text_layers = SpansView(ocr_store) if ocr_store is not None else None
         log.info("rebuild: encoding %d pages [quality=%d monochrome=%s bg_scale=%s bg_denoise=%s] -> %s",
-                 len(out_pages), q, mono, bg_scale, bg_denoise, os.path.basename(out_path))
+                 len(out_pages), q, mono, bg_scale, bg_denoise,
+                 os.path.basename(out_path))
         # jbig2_bin is handed to rebuild_pdf unconditionally: MRC's text
         # segmentation (leptonica adaptive threshold) needs it regardless of
         # how bw-text pages are encoded. rebuild_pdf only uses it for the
         # *encoding* of bw-text pages when monochrome == "jbig2".
         rebuild_pdf(out_pages, out_path, jpeg_quality=q,
-                    text_layers=text_layers if self.ocr is not None else None,
-                    font_file=self.ocr_font if self.ocr is not None else None,
+                    text_layers=text_layers,
+                    font_file=self.ocr_font if text_layers else None,
                     monochrome=mono,
                     mrc_bg_scale=bg_scale,
                     mrc_bg_denoise=bg_denoise,
@@ -224,12 +310,47 @@ class EnhancePipeline:
         if save_images_dir:
             os.makedirs(save_images_dir, exist_ok=True)
             for p in out_pages:
-                cv2.imwrite(os.path.join(save_images_dir, f"page_{p['index']:04d}.png"),
-                            p["image"])
+                shutil.copyfile(p["image_path"], os.path.join(
+                    save_images_dir, f"page_{p['index']:04d}.png"))
 
         if self.device.type == "cuda":
             peak = self.torch.cuda.max_memory_allocated() / 1024**3
             log.info("peak VRAM allocated: %.2f GB", peak)
 
+        keep = cfg.get("debug", {}).get("keep_checkpoint", True)
+        if keep:
+            log.info("checkpoint kept: %s (%s) — re-tuning compression can "
+                     "rebuild from it with --rebuild-only",
+                     store.dir, human_size(store.dir_size()))
+        else:
+            clear_checkpoints(ckpt_root)
+            log.info("checkpoint removed (debug.keep_checkpoint=false)")
+
         log.info("total: %.1fs for %d pages -> %s",
-                 time.time() - t0, len(pages), out_path)
+                 time.time() - t0, len(out_pages), out_path)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _cached_entry(store: PageStore, i: int) -> dict:
+        m = store.meta(i)
+        return {
+            "index": i,
+            "image_path": store.image_path(i),
+            "ptype": m["ptype"],
+            "width_pt": m["width_pt"],
+            "height_pt": m["height_pt"],
+        }
+
+    @staticmethod
+    def _link_or_copy(src: str, dst: str):
+        """Hardlink when possible so keep_temp does not duplicate the
+        checkpoint on disk; fall back to a copy."""
+        try:
+            if os.path.exists(dst):
+                os.remove(dst)
+            os.link(src, dst)
+        except OSError:
+            try:
+                shutil.copyfile(src, dst)
+            except OSError as e:
+                log.warning("could not export %s: %s", dst, e)

@@ -48,6 +48,17 @@ def main():
     parser.add_argument("--pages", default=None,
                         help="page range to process: '50' (first 50) or '10-59' "
                              "(1-based inclusive)")
+    parser.add_argument("--no-resume", dest="resume", action="store_false",
+                        default=True,
+                        help="ignore existing checkpoints and redo every page "
+                             "(default: resume, reusing pages finished by an "
+                             "interrupted earlier run)")
+    parser.add_argument("--rebuild-only", action="store_true",
+                        help="skip enhancement and rebuild the PDF from the "
+                             "checkpoint (re-tune compression in minutes); "
+                             "fails if any page is missing")
+    parser.add_argument("--clear-checkpoint", action="store_true",
+                        help="delete this book's checkpoint before processing")
     parser.add_argument("--list-backends", action="store_true",
                         help="list available restore/SR backends and exit")
     args = parser.parse_args()
@@ -126,7 +137,10 @@ def main():
         img_dir = os.path.join(PROJECT_ROOT, "output", f"{name}_images") \
             if args.save_images else None
         pipe.process_pdf(pdf, out_pdf, save_images_dir=img_dir,
-                         page_range=page_range)
+                         page_range=page_range,
+                         resume=args.resume,
+                         rebuild_only=args.rebuild_only,
+                         clear_checkpoint=args.clear_checkpoint)
 
     print("done.")
 
