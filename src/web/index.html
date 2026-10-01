@@ -358,7 +358,7 @@ const jobsEl = $('#jobs');
 const STORE_KEY = 'pdfenhancer.settings.v1';
 let defaults = {scale:2,quality:85,ocr:false,restore_enabled:true,restore_backend:'docres',
   sr_enabled:true,sr_backend:'realesrgan-general',routing:'off',dpi:'auto',device:'auto',
-  monochrome:'1bit',fp16:true};
+  monochrome:'1bit',fp16:true,mrc_stencil:'jbig2',enc_workers:'auto',enc_priority:'below-normal'};
 let settings = Object.assign({}, defaults, loadStore());
 let pv = {};            // 每任务参数覆盖
 const sigs = {};        // 每任务渲染签名
@@ -544,6 +544,9 @@ function paramGridHTML(id, job){
       ${fieldHTML(id,job,'dpi','渲染 DPI','text')}
       ${fieldHTML(id,job,'device','计算设备','select',[{v:'auto',t:'auto'},{v:'cuda',t:'cuda (GPU)'},{v:'cpu',t:'cpu'}])}
       ${fieldHTML(id,job,'monochrome','黑白编码','select',[{v:'1bit',t:'1bit'},{v:'jbig2',t:'jbig2'}])}
+      ${fieldHTML(id,job,'mrc_stencil','前景模板编码','select',[{v:'jbig2',t:'jbig2（更小，无损）'},{v:'flate',t:'flate'}])}
+      ${fieldHTML(id,job,'enc_workers','编码并行进程','text')}
+      ${fieldHTML(id,job,'enc_priority','编码进程优先级','select',[{v:'below-normal',t:'低于正常（不卡电脑）'},{v:'idle',t:'最低（idle）'},{v:'normal',t:'正常（会卡）'}])}
       ${fieldHTML(id,job,'fp16','fp16 半精度','check')}
       ${fieldHTML(id,job,'ocr','内置 OCR 文字层','check')}
     </div>
@@ -645,6 +648,9 @@ function collectParams(id){
   o.dpi = g('dpi')||'auto';
   o.device = g('device')||'auto';
   o.monochrome = g('monochrome')||'1bit';
+  o.mrc_stencil = g('mrc_stencil')||'jbig2';
+  o.enc_workers = g('enc_workers')||'auto';
+  o.enc_priority = g('enc_priority')||'below-normal';
   o.fp16 = g('fp16')!==false;
   const ps = pv[id] ? pv[id].pstart : undefined;
   const pe = pv[id] ? pv[id].pend : undefined;
@@ -758,6 +764,9 @@ function settingsGridHTML(){
     ${txtField('dpi','渲染 DPI（auto 或数字）', settings.dpi)}
     ${selField('device','计算设备',[{v:'auto',t:'auto'},{v:'cuda',t:'cuda (GPU)'},{v:'cpu',t:'cpu'}], settings.device)}
     ${selField('monochrome','黑白编码',[{v:'1bit',t:'1bit'},{v:'jbig2',t:'jbig2'}], settings.monochrome)}
+    ${selField('mrc_stencil','前景模板编码',[{v:'jbig2',t:'jbig2（更小，无损）'},{v:'flate',t:'flate'}], settings.mrc_stencil)}
+    ${txtField('enc_workers','编码并行进程（auto 或数字）', settings.enc_workers)}
+    ${selField('enc_priority','编码进程优先级',[{v:'below-normal',t:'低于正常（不卡电脑）'},{v:'idle',t:'最低（idle）'},{v:'normal',t:'正常（会卡）'}], settings.enc_priority)}
     ${selField('fp16','fp16 半精度',[{v:true,t:'开'},{v:false,t:'关'}], settings.fp16)}
     ${selField('ocr','内置 OCR 文字层',[{v:false,t:'关（交给 FineReader）'},{v:true,t:'开'}], settings.ocr)}
   `;

@@ -56,6 +56,11 @@ DEFAULTS = {
     "dpi": "auto",                  # auto | 数字
     "device": "auto",               # auto | cuda | cpu
     "monochrome": "1bit",           # 1bit | jbig2
+    "mrc_stencil": "jbig2",         # MRC 前景模板编码：jbig2 | flate
+                                    # （模板是全文件大头，jbig2 比 flate 小 2.4×
+                                    #  且逐位一致；flate 仅作对照/排障用）
+    "enc_workers": "auto",          # 编码并行进程数：auto = 物理核 - 2
+    "enc_priority": "below-normal", # 编码进程优先级，避免长跑时桌面卡顿
     "fp16": True,
 }
 
@@ -286,6 +291,9 @@ def _run_job(job: Job):
         cfg["ocr"]["enabled"] = bool(p.get("ocr", False))
         cfg["compression"]["jpeg_quality"] = int(p.get("quality", 85))
         cfg["compression"]["monochrome"] = p.get("monochrome", "1bit")
+        cfg["compression"]["mrc_stencil"] = p.get("mrc_stencil", "jbig2")
+        cfg["compression"]["encode_workers"] = p.get("enc_workers", "auto")
+        cfg["compression"]["encode_priority"] = p.get("enc_priority", "below-normal")
         cfg["gpu"]["device"] = p.get("device", "auto")
         cfg["gpu"]["fp16"] = bool(p.get("fp16", True))
         cfg["debug"]["keep_temp"] = False
