@@ -14,6 +14,8 @@
 - [x] 混合路由 SR（`routing: by-type`，文字页→RealESRGAN、插图页→SwinIR）
 - [x] auto DPI 渲染（按每页内嵌扫描图名义 DPI 零插值，防无意义放大）
 - [x] MRC 分层压缩（v3：JPEG 背景 + 多色 1-bit 前景层，省 2.3~3.1 倍）
+- [x] 页数范围参数（`--pages N` / `--pages a-b`）
+- [x] 本地 Web GUI（`run_gui.bat`，拖入/队列/进度/对比图，OCR 默认关闭）
 
 ## 1. 安装（一次性）
 
@@ -51,10 +53,35 @@ run.bat --dpi auto              # 按每页内嵌扫描图名义 DPI 零插值�
 run.bat --dpi 300               # 固定渲染 DPI（矢量页 / 无内嵌图时用）
 run.bat --routing by-type       # 混合路由 SR：文字页→RealESRGAN、插图页→SwinIR
 run.bat --list-backends         # 列出已注册的修复/超分后端
+run.bat --pages 50              # 只处理前 50 页
+run.bat --pages 10-59           # 只处理第 10~59 页（1-based 含两端）
 ```
 
 输出：`output\<书名>_enhanced.pdf`；中间页图（默认保留）在 `temp\<书名>\`，  
 日志在 `logs\<书名>.log`（含每页耗时与显存峰值）。
+
+## 2.5 图形界面（GUI）
+
+不想记命令行参数时，双击 `run_gui.bat` 启动本地 Web 界面（零额外依赖，  
+纯 Python 标准库 + 原生 HTML/JS，**服务就绪后浏览器自动打开** `http://127.0.0.1:8765`）：
+
+- **任务队列**：拖入（或点「选择文件」）多本 PDF 排队，实时**阶段进度**
+  （渲染 → OCR → 修复·超分 → 重建 → 完成）+ 逐页日志；
+- 每本单独设置：**页数范围**、SR 倍数、JPEG 质量，以及可展开的**高级参数**
+  （修复/SR 后端、混合路由、渲染 DPI、CPU/GPU、单色编码、fp16、OCR）；
+- **全局操作**：开始全部 / 全部停止 / 清空已完成；任务串行执行（GPU 独占）；
+- **对比查看**：选任务+页码 → **拖动滑块左右对比**原书与增强效果，可缩放、下载对比拼图；
+- **高级设置**：默认参数存本地，新任务自动套用；
+- 完成后可一键在资源管理器中**打开/定位输出文件**。
+
+OCR 默认**关闭**：本项目专注图像增强（DocRes + 超分 + MRC 压缩），文字层建议  
+用 ABBYY FineReader 等专业 OCR 工具手动添加（识别精度更高，且避免了内置  
+RapidOCR 的漏检/错位问题）。
+
+```
+run_gui.bat            # 默认端口 8765（被占用时自动向后找空闲端口）
+run_gui.bat 9000       # 指定端口
+```
 
 ### OCR 隐藏文字层（Phase 3）
 
@@ -151,9 +178,12 @@ super_resolution:
 
 ```
 run.bat            主入口（自动设置全部缓存环境变量）
+run_gui.bat        图形界面入口（本地 Web GUI，浏览器操作）
 config/config.yaml 全部参数
 scripts/           安装/测试/环境脚本
-src/               流水线代码（渲染/分类/修复/超分/重建）
+src/               流水线代码（渲染/分类/修复/超分/重建/OCR）
+src/gui.py         本地 Web GUI 后端（零依赖，标准库 http.server）
+src/web/           GUI 前端（原生 HTML/JS）
 third_party/       vendored 模型定义（DocRes-Restormer, SRVGG）
 env/               独立 Python venv
 models/            模型权重
