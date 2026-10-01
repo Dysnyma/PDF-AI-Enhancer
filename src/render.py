@@ -3,7 +3,6 @@ import logging
 import os
 import tempfile
 import time
-import zlib
 
 import cv2
 import pymupdf as fitz  # PyMuPDF
@@ -213,7 +212,7 @@ def _mrc_plane_params(ptype: str, mrc_bg_scale, mrc_bg_denoise):
 
 def encode_page_payload(img, ptype: str, *, jpeg_quality: int,
                         monochrome: str, mrc_bg_scale, mrc_bg_denoise,
-                        jbig2_bin, workdir: str):
+                        jbig2_bin, workdir: str, mrc_stencil: str = "jbig2"):
     """Encode one enhanced page into a small, picklable payload.
 
     This is the slow half of rebuilding: MRC segmentation alone is ~8 s per
@@ -228,7 +227,7 @@ def encode_page_payload(img, ptype: str, *, jpeg_quality: int,
       ("1bit",  png_bytes)
       ("jbig2", sym_bytes, jb2_bytes, w, h)
       ("jpeg",  jpg_bytes)
-      ("mrc",   bg_jpg, [(packed, fill), ...], h, w)
+      ("mrc",   bg_jpg, [(mode, data, fill, cost), ...], h, w)
     """
     if ptype == "bw-text":
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -244,19 +243,20 @@ def encode_page_payload(img, ptype: str, *, jpeg_quality: int,
 
     if ptype in ("mixed", "color-text", "gray-text"):
         # Dual-encode and keep the smaller: MRC layered (JPEG background with
-        # text whitened + per-colour 1-bit stencils over glyph strokes) wins
-        # on text-heavy pages; whole-page JPEG wins when the figure dominates
-        # or the page carries no meaningful text. Stencils are compared at
-        # their Flate-compressed size (raw packing is ~5.6 MB/page each,
-        # zlib ~0.3 MB).
+        # text whitened + per-colour stencils over glyph strokes) wins on
+        # text-heavy pages; whole-page JPEG wins when the figure dominates or
+        # the page carries no meaningful text. Each layer reports the size it
+        # will actually occupy (JBIG2 exact, Flate via zlib), because raw
+        # packing is ~5.6 MB/stencil and would make MRC lose every time.
         from src.mrc import encode_mrc
         scale, denoise = _mrc_plane_params(ptype, mrc_bg_scale, mrc_bg_denoise)
         mrc = encode_mrc(img, jpeg_quality, bg_gray=(ptype == "gray-text"),
                          jbig2_bin=jbig2_bin, workdir=workdir,
-                         bg_scale=scale, bg_denoise=denoise)
+                         bg_scale=scale, bg_denoise=denoise,
+                         stencil_codec=mrc_stencil)
         jpg = encode_page_image(img, ptype, jpeg_quality)
         if mrc[0] is not None and mrc[1]:
-            z_est = sum(len(zlib.compress(pk, 6)) for pk, _ in mrc[1])
+            z_est = sum(layer[3] for layer in mrc[1])
             if len(mrc[0]) + z_est < len(jpg):
                 bg_jpg, layers, mh, mw = mrc
                 return ("mrc", bg_jpg, layers, mh, mw)
@@ -444,6 +444,7 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
                 font_file: str | None = None,
                 monochrome: str = "1bit",
                 jbig2_bin: str | None = None,
+                mrc_stencil: str = "jbig2",
                 mrc_bg_scale="auto", mrc_bg_denoise="auto",
                 encode_workers="auto", encode_priority="below-normal"):
     """Build a new PDF from processed page images.
@@ -464,9 +465,14 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
       the machine stutter; below-normal keeps the UI responsive and costs
       nothing while the machine is idle.
     monochrome: "1bit" (default) or "jbig2" — encoding for bw-text pages.
-      jbig2 is EXPERIMENTAL: PyMuPDF strips the /JBIG2Decode filter on save
-      (MuPDF has no JBIG2 support), which corrupts the page (renders all
-      black). A post-save validation reverts such output to the 1-bit path.
+      jbig2 is still marked EXPERIMENTAL: the /JBIG2Decode filter must be
+      re-set after update_stream (see embed_jbig2), and the post-save guard
+      below reverts to the 1-bit path if it ever comes out wrong.
+    mrc_stencil: "jbig2" (default) or "flate" — codec for the MRC text
+      stencils. These are the bulk of the file (54.7% of a 340-page book) and
+      jbig2enc's generic coder is ~2.9x smaller on them than Flate, with a
+      bit-identical raster (verified in Ghostscript AND MuPDF, maxdiff 0).
+      "flate" exists as an escape hatch, not as a quality/size preference.
     mrc_bg_scale: MRC background-plane downsampling factor — "auto" | int.
       "auto" picks 2 for every text page: the render pipeline runs at the
       source's effective DPI, so a factor of 2 puts the background back at
@@ -494,6 +500,7 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
     os.makedirs(scratch, exist_ok=True)
     pages = list(pages)
     opts = dict(jpeg_quality=jpeg_quality, monochrome=monochrome,
+                mrc_stencil=mrc_stencil,
                 mrc_bg_scale=mrc_bg_scale, mrc_bg_denoise=mrc_bg_denoise,
                 jbig2_bin=jbig2_bin, workdir=scratch)
     # Worker setup needs everything `opts` has, plus the priority. Kept apart

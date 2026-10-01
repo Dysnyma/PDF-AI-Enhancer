@@ -56,7 +56,16 @@ ocr:
 compression:
   color: jpeg         # jpeg | jp2(可选)
   grayscale: jpeg
-  monochrome: 1bit    # 黑白文字页编码：1bit(默认,无损安全) | jbig2(更小但有符号合并幻觉风险,MuPDF无法预览)
+  monochrome: 1bit    # bw-text 页编码：1bit(默认,无损安全) | jbig2(体积更小但有
+                      # 符号合并幻觉风险，故默认不用)——注意这只管"纯黑白文字页"，
+                      # MRC 页面走下面的 mrc_stencil。
+  mrc_stencil: jbig2  # MRC 前景模板(1bit ImageMask)编码：jbig2(默认) | flate
+                      # 这些模板是整个文件的大头（340 页书里占 30.6MB / 54.7%）。
+                      # Flate 对文字位图是错的编解码器：jbig2enc 的 generic
+                      # coder 实测小 2.9 倍（20 页 1.56MB→0.62MB），且栅格
+                      # 完全一致——Ghostscript 与 MuPDF 渲染 maxdiff 均为 0。
+                      # 用 generic(-p) 而非符号模式(-s)：不做字形合并，无损。
+                      # jbig2.exe 缺失或失败时自动退回 flate。
   jpeg_quality: 85
   mrc_bg_scale: auto  # MRC 背景层降采样倍数：auto | 1(不降) | 2 | 3 | 4
                       # 背景层只承载低频信息（纸面/渐变/光照/大插图），文字全部

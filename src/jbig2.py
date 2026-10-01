@@ -8,11 +8,17 @@ Two strategies, selectable via config `compression.monochrome`:
     keeps the hidden OCR text layer working end-to-end).
 
   - "jbig2": adaptive binarization -> agl/jbig2enc (tools/jbig2/jbig2.exe)
-    symbol mode. Better compression but (a) the symbol merger is lossy and can
+    symbol mode. Better compression but the symbol merger is lossy and can
     substitute similar glyphs (the "hallucinated character" risk the project
-    explicitly wants to avoid), and (b) MuPDF is compiled without JBIG2Decode
-    so PyMuPDF cannot render/verify the result. It remains available for
-    users who prioritise size over glyph fidelity.
+    explicitly wants to avoid). This is why MRC stencils use jbig2enc's
+    generic coder instead (see mrc.encode_stencil_jbig2) — same encoder,
+    lossless mode.
+
+    MuPDF does decode JBIG2; an earlier note here claimed otherwise. What
+    actually happened is that update_stream() drops the /Filter key, so the
+    later save(deflate=True) re-deflated these streams and relabelled them
+    /FlateDecode, i.e. the output was never valid JBIG2 to begin with.
+    embed_jbig2 now re-sets the filter keys after update_stream.
 
 NOTE: binarization itself is lossy (gray -> black/white). It is only ever
 applied to pages classified as pure BW text; color/gray/mixed pages never go
@@ -157,7 +163,15 @@ def _ensure_resource(page, img_xref: int):
 
 def embed_jbig2(page, sym_bytes: bytes, jb2_bytes: bytes,
                 width: int, height: int, rect):
-    """Embed a JBIG2 image (globals + page stream) into a page."""
+    """Embed a JBIG2 image (globals + page stream) into a page.
+
+    NOTE: both filter keys must be (re)set with xref_set_key *after*
+    update_stream. update_stream() drops every /Filter key, and the later
+    save(deflate=True) then deflates these streams and relabels them
+    /FlateDecode, so the JBIG2 payload decodes to garbage. That silent
+    corruption — not a missing decoder — is why this path was long believed
+    to be un-renderable: the files it produced were never valid JBIG2.
+    """
     doc = page.parent
 
     # globals stream (pure JBIG2 data, no image dict fields)
@@ -170,8 +184,11 @@ def embed_jbig2(page, sym_bytes: bytes, jb2_bytes: bytes,
     doc.update_object(
         img_xref,
         f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
-        f"/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode "
-        f"/DecodeParms << /JBIG2Globals {g_xref} 0 R >> >>")
+        f"/ColorSpace /DeviceGray /BitsPerComponent 1 "
+        f"/Decode [1 0] >>")
     doc.update_stream(img_xref, jb2_bytes, compress=0)
+    doc.xref_set_key(img_xref, "Filter", "/JBIG2Decode")
+    doc.xref_set_key(img_xref, "DecodeParms",
+                     f"<< /JBIG2Globals {g_xref} 0 R >>")
 
     _paint_jbig2(page, img_xref, rect)

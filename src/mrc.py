@@ -23,13 +23,24 @@ kept; rarer colors fall back to the background JPEG untouched.
 
 Encoding: classic MRC stencil structure —
   background: JPEG (ALL stenciled text whitened out, figures untouched)
-  foreground: N x [1-bit /ImageMask (PyMuPDF Flate) + per-group fill]
+  foreground: N x [1-bit /ImageMask (JBIG2, Flate fallback) + per-group fill]
   Paint polarity verified empirically: ink bits = 0 + /Decode [0 1].
+
+The stencils are the bulk of the finished file — 54.7% of a 340-page book
+(30.6 MB of 56.0 MB) — and they used to be Flate, which is the wrong codec
+for text bitmaps. jbig2enc's generic region coder is ~2.6x smaller on them
+(measured: 1.56 MB -> 0.62 MB over 20 real pages, rasters bit-identical), so
+JBIG2 is now the default and Flate the fallback.
+
+This is encoding only: the *thresholding* that decides the mask was already
+jbig2enc's (see _threshold_mask), so the mask itself is unchanged.
 """
 import glob
 import logging
 import os
+import struct
 import subprocess
+import zlib
 
 import cv2
 import numpy as np
@@ -115,7 +126,7 @@ def cleanup_threshold_files(workdir: str | None) -> None:
     if not workdir:
         return
     patterns = ("_mrc_in_*.png", "_mrc_thr_*.png", "_jbig2_bw_*.png",
-                "_jbig2_*.sym", "_jbig2_*.0000")
+                "_jbig2_*.sym", "_jbig2_*.0000", "_stencil_*.png")
     removed = 0
     for pat in patterns:
         for p in glob.glob(os.path.join(glob.escape(workdir), pat)):
@@ -353,10 +364,62 @@ def split_mrc(img_bgr: np.ndarray, jbig2_bin: str | None = None,
     return bg, layers
 
 
+def _png_1bit(packed_rows: bytes, width: int, height: int) -> bytes:
+    """Wrap row-packed 1-bit samples in a minimal 1-bpp grayscale PNG.
+
+    jbig2enc only skips its own binarizer when the input is already 1 bpp.
+    Hand it an 8-bit PNG and it re-thresholds the mask (adaptively by
+    default), i.e. it edits the very bitmap we just decided on.
+    """
+    stride = (width + 7) // 8
+    raw = b"".join(b"\x00" + packed_rows[y * stride:(y + 1) * stride]
+                   for y in range(height))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def encode_stencil_jbig2(packed_rows: bytes, width: int, height: int,
+                         jbig2_bin: str, workdir: str) -> bytes | None:
+    """Encode one 1-bit stencil as JBIG2, or None if the encoder fails.
+
+    Generic region coder (`-p`, produce PDF-ready data). Deliberately NOT
+    symbol mode (`-s`): symbol mode merges look-alike glyphs, which is exactly
+    the "hallucinated character" risk this project refuses to take. Generic
+    mode is lossless, so the raster is bit-identical to the Flate one — it is
+    only the container that changes.
+    """
+    tag = os.getpid()
+    png_path = os.path.abspath(os.path.join(workdir, f"_stencil_{tag}.png"))
+    try:
+        with open(png_path, "wb") as fh:
+            fh.write(_png_1bit(packed_rows, width, height))
+        res = subprocess.run([os.path.abspath(jbig2_bin), "-p", png_path],
+                             capture_output=True, cwd=workdir, timeout=180)
+        if res.returncode != 0 or not res.stdout:
+            log.warning("jbig2 stencil encode failed: %s",
+                        res.stderr.decode(errors="replace")[-300:])
+            return None
+        return res.stdout
+    except Exception as e:  # noqa: BLE001 - any failure must fall back to Flate
+        log.warning("jbig2 stencil encode raised (%s); using Flate", e)
+        return None
+    finally:
+        try:
+            os.remove(png_path)
+        except OSError:
+            pass
+
+
 def encode_mrc(img_bgr: np.ndarray, jpeg_quality: int,
                bg_gray: bool = False, jbig2_bin: str | None = None,
                workdir: str | None = None, bg_scale: int = 1,
-               bg_denoise: int = 0):
+               bg_denoise: int = 0, stencil_codec: str = "jbig2"):
     """Encode a page as MRC layers.
 
     Returns (background_jpeg, layers, height, width) where layers is a list
@@ -405,38 +468,59 @@ def encode_mrc(img_bgr: np.ndarray, jpeg_quality: int,
         raise RuntimeError("MRC background JPEG encode failed")
 
     # ImageMask stencil, 1-bit row-packed, ink = 0 bit (verified polarity:
-    # /Decode [0 1] paints zero samples). Returned RAW: it MUST be stored
-    # via doc.update_stream(xref, packed, compress=1) — letting PyMuPDF do
-    # its own deflate. A hand-zlib'd stream with a manual /Filter entry
-    # triggers a MuPDF render bug (page comes out all black).
-    packed_layers = [(np.packbits((~stencil).astype(np.uint8),
-                                  axis=1).tobytes(), fill)
-                     for stencil, fill in layers]
+    # /Decode [0 1] paints zero samples).
+    #
+    # Each layer carries (mode, data, fill, stored_size). stored_size is what
+    # the layer will actually cost in the file, which is what the caller's
+    # dual-encode decision compares against a whole-page JPEG: for JBIG2 the
+    # bytes are already final, for Flate it is the zlib estimate (PyMuPDF
+    # deflates at embed time, and its output lands within a few percent).
     h, w = layers[0][0].shape
-    return bg_jpg.tobytes(), packed_layers, h, w
+    enc_layers = []
+    for stencil, fill in layers:
+        packed = np.packbits((~stencil).astype(np.uint8), axis=1).tobytes()
+        if (stencil_codec == "jbig2" and jbig2_bin and workdir
+                and os.path.isfile(jbig2_bin)):
+            jb2 = encode_stencil_jbig2(packed, w, h, jbig2_bin, workdir)
+            if jb2:
+                enc_layers.append(("jbig2", jb2, fill, len(jb2)))
+                continue
+        enc_layers.append(("flate", packed, fill, len(zlib.compress(packed, 6))))
+    return bg_jpg.tobytes(), enc_layers, h, w
 
 
 def embed_mrc(page, bg_jpg: bytes, layers, height: int, width: int):
     """Insert the background JPEG plus the per-color stencil masks on `page`.
 
-    layers: list of (packed, fill_bgr) from encode_mrc. packed is the RAW
-    1-bit row-packed stencil (ink = 0 bit), stored with compress=1 so
-    PyMuPDF applies its own FlateDecode — the only variant MuPDF renders
-    correctly (hand-compressed streams with a manual /Filter render black).
+    layers: list of (mode, data, fill_bgr, stored_size) from encode_mrc.
+
+    mode "jbig2": data is a JBIG2 generic-region stream, written verbatim with
+      /JBIG2Decode and compress=0 (it is already entropy coded).
+      The /Filter key MUST be re-set with xref_set_key AFTER update_stream:
+      update_stream() drops every /Filter key, and save(deflate=True) then
+      deflates the payload and relabels it /FlateDecode — which decodes to
+      garbage and renders the page black. Verified: same call order without
+      the re-set writes 294 bytes out of a 1032-byte payload.
+
+    mode "flate": data is the RAW 1-bit row-packed stencil (ink = 0 bit),
+      stored with compress=1 so PyMuPDF applies its own FlateDecode — the
+      only variant MuPDF renders correctly (a hand-zlib'd stream with a
+      manual /Filter entry renders the page all black).
     """
     from src.jbig2 import _paint_jbig2
 
     page.insert_image(page.rect, stream=bg_jpg)
 
     doc = page.parent
-    for packed, (b, g, r) in layers:
+    for mode, data, (b, g, r), _cost in layers:
         xref = doc.get_new_xref()
-        doc.update_object(
-            xref,
-            f"<< /Type /XObject /Subtype /Image /Width {width} "
-            f"/Height {height} /ImageMask true /BitsPerComponent 1 "
-            f"/Decode [0 1] >>")
-        doc.update_stream(xref, packed, compress=1)
+        common = (f"<< /Type /XObject /Subtype /Image /Width {width} "
+                  f"/Height {height} /ImageMask true /BitsPerComponent 1 "
+                  f"/Decode [0 1] >>")
+        doc.update_object(xref, common)
+        doc.update_stream(xref, data, compress=0 if mode == "jbig2" else 1)
+        if mode == "jbig2":
+            doc.xref_set_key(xref, "Filter", "/JBIG2Decode")
         _paint_jbig2(page, xref, page.rect,
                      fill=f"{r / 255.0:.4f} {g / 255.0:.4f} "
                           f"{b / 255.0:.4f} rg ")

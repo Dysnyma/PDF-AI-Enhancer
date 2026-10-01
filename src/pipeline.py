@@ -288,24 +288,27 @@ class EnhancePipeline:
         # --- rebuild ---
         q = int(cfg["compression"].get("jpeg_quality", 85))
         mono = cfg["compression"].get("monochrome", "1bit")
+        stencil = cfg["compression"].get("mrc_stencil", "jbig2")
         bg_scale = cfg["compression"].get("mrc_bg_scale", "auto")
         bg_denoise = cfg["compression"].get("mrc_bg_denoise", "auto")
         enc_workers = cfg["compression"].get("encode_workers", "auto")
         enc_priority = cfg["compression"].get("encode_priority", "below-normal")
         jbig2_bin = os.path.join(self.project_root, "tools", "jbig2", "jbig2.exe")
         text_layers = SpansView(ocr_store) if ocr_store is not None else None
-        log.info("rebuild: encoding %d pages [quality=%d monochrome=%s bg_scale=%s "
-                 "bg_denoise=%s workers=%s priority=%s] -> %s",
-                 len(out_pages), q, mono, bg_scale, bg_denoise, enc_workers,
-                 enc_priority, os.path.basename(out_path))
+        log.info("rebuild: encoding %d pages [quality=%d monochrome=%s stencil=%s "
+                 "bg_scale=%s bg_denoise=%s workers=%s priority=%s] -> %s",
+                 len(out_pages), q, mono, stencil, bg_scale, bg_denoise,
+                 enc_workers, enc_priority, os.path.basename(out_path))
         # jbig2_bin is handed to rebuild_pdf unconditionally: MRC's text
         # segmentation (leptonica adaptive threshold) needs it regardless of
-        # how bw-text pages are encoded. rebuild_pdf only uses it for the
-        # *encoding* of bw-text pages when monochrome == "jbig2".
+        # how pages are encoded, and it is the encoder for the MRC stencils
+        # (mrc_stencil="jbig2", the default) as well as for bw-text pages
+        # when monochrome == "jbig2".
         rebuild_pdf(out_pages, out_path, jpeg_quality=q,
                     text_layers=text_layers,
                     font_file=self.ocr_font if text_layers else None,
                     monochrome=mono,
+                    mrc_stencil=stencil,
                     mrc_bg_scale=bg_scale,
                     mrc_bg_denoise=bg_denoise,
                     jbig2_bin=jbig2_bin,
