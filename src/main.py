@@ -59,6 +59,11 @@ def main():
                              "fails if any page is missing")
     parser.add_argument("--clear-checkpoint", action="store_true",
                         help="delete this book's checkpoint before processing")
+    parser.add_argument("--output", "-o", default=None,
+                        help="explicit output PDF path. Without it the name is "
+                             "output/<book>_enhanced.pdf, and a --pages run "
+                             "appends _p<a>-<b> so a slice cannot silently "
+                             "overwrite a finished full book")
     parser.add_argument("--list-backends", action="store_true",
                         help="list available restore/SR backends and exit")
     args = parser.parse_args()
@@ -121,6 +126,10 @@ def main():
             page_range = (0, int(spec) - 1)
 
     os.makedirs(os.path.join(PROJECT_ROOT, "output"), exist_ok=True)
+    if args.output and len(pdfs) > 1:
+        print("--output needs a single input PDF (got "
+              f"{len(pdfs)}); pass one path or drop --output")
+        sys.exit(1)
 
     from src.pipeline import EnhancePipeline
     pipe = EnhancePipeline(cfg, PROJECT_ROOT)
@@ -133,8 +142,17 @@ def main():
         log = logging.getLogger("pdfenhance")
         log.info("=== processing %s ===", pdf)
 
-        out_pdf = os.path.join(PROJECT_ROOT, "output", f"{name}_enhanced.pdf")
-        img_dir = os.path.join(PROJECT_ROOT, "output", f"{name}_images") \
+        # A --pages run is an experiment; it must not land on the same filename
+        # as the full book, or a 2-page check silently replaces a finished
+        # 340-page result (this has happened twice in this project).
+        suffix = f"_p{page_range[0] + 1}-{page_range[1] + 1}" if page_range else ""
+        if args.output:
+            out_pdf = os.path.abspath(args.output)
+        else:
+            out_pdf = os.path.join(PROJECT_ROOT, "output",
+                                   f"{name}{suffix}_enhanced.pdf")
+        img_dir = os.path.join(PROJECT_ROOT, "output",
+                               f"{name}{suffix}_images") \
             if args.save_images else None
         pipe.process_pdf(pdf, out_pdf, save_images_dir=img_dir,
                          page_range=page_range,

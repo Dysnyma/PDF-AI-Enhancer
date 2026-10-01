@@ -128,6 +128,27 @@ def cleanup_threshold_files(workdir: str | None) -> None:
         log.debug("cleaned %d encoder scratch file(s) in %s", removed, workdir)
 
 
+def cleanup_own_scratch(workdir: str | None) -> int:
+    """Remove only THIS process's scratch files. Safe to call from a worker.
+
+    cleanup_threshold_files() globs every pid, so a worker calling it at exit
+    would delete files its siblings are still using. Here the names are
+    derived from os.getpid(), so each worker reclaims exactly its own pair.
+    Each worker holds one pair for a whole run (the names are reused page
+    after page), so this is two deletes per worker rather than two per page.
+    """
+    if not workdir:
+        return 0
+    removed = 0
+    for name in (f"_mrc_in_{os.getpid()}.png", f"_mrc_thr_{os.getpid()}.png"):
+        try:
+            os.remove(os.path.join(workdir, name))
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def _large_dark_blobs(gray: np.ndarray) -> np.ndarray:
     """Mask of big connected dark regions (photos, dark figure fills).
 

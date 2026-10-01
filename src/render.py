@@ -1,6 +1,7 @@
 """PDF rendering and rebuilding via PyMuPDF."""
 import logging
 import os
+import tempfile
 import time
 import zlib
 
@@ -280,23 +281,132 @@ def embed_page_payload(page, payload):
         embed_mrc(page, payload[1], payload[2], payload[3], payload[4])
 
 
+def physical_cores() -> int | None:
+    """Physical (non-SMT) core count on Windows, else None.
+
+    ``os.cpu_count()`` returns *logical* CPUs. On the 8c/16t laptop this was
+    developed on, halving 16 gives 8 — every physical core — so a worker
+    count derived from it silently pins the whole machine. That is exactly
+    how this encoder made the user's desktop stutter, so ask Windows
+    properly: GetLogicalProcessorInformation emits one
+    RelationProcessorCore (=0) entry per physical core.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Cache(ctypes.Structure):
+            _fields_ = [("Level", ctypes.c_ubyte),
+                        ("Associativity", ctypes.c_ubyte),
+                        ("LineSize", ctypes.c_ushort),
+                        ("Size", ctypes.c_ulong),
+                        ("Type", ctypes.c_int)]
+
+        class _Payload(ctypes.Union):
+            _fields_ = [("ProcessorCore", ctypes.c_ulong),
+                        ("NumaNode", ctypes.c_ulong),
+                        ("Cache", _Cache),
+                        ("Reserved", ctypes.c_ulonglong * 2)]
+
+        class _Slpi(ctypes.Structure):
+            _fields_ = [("ProcessorMask", ctypes.c_size_t),
+                        ("Relationship", ctypes.c_ulong),
+                        ("Payload", _Payload)]
+
+        k32 = ctypes.windll.kernel32
+        need = wintypes.DWORD(0)
+        k32.GetLogicalProcessorInformation(None, ctypes.byref(need))
+        if not need.value:
+            return None
+        buf = (ctypes.c_byte * need.value)()
+        if not k32.GetLogicalProcessorInformation(buf, ctypes.byref(need)):
+            return None
+        count = need.value // ctypes.sizeof(_Slpi)
+        entries = ctypes.cast(buf, ctypes.POINTER(_Slpi))
+        cores = sum(1 for i in range(count) if entries[i].Relationship == 0)
+        return cores or None
+    except Exception:
+        return None
+
+
+#: SetPriorityClass constants.
+_NORMAL, _BELOW_NORMAL, _IDLE = 0x00000020, 0x00004000, 0x00000040
+
+
+def apply_encode_priority(mode: str | None) -> str | None:
+    """Lower this process's CPU priority so the desktop stays usable.
+
+    The encoder saturates every core it is handed. At NORMAL priority Windows
+    gives it the same share as whatever the user is typing into, so a full
+    book makes the machine stutter. BELOW_NORMAL costs nothing while the
+    machine is idle — the workers are still the only runnable threads — and
+    yields instantly when it is not, which is why it beats simply using fewer
+    workers. Returns the class actually applied, or None.
+    """
+    if os.name != "nt":
+        return None
+    classes = {"normal": _NORMAL, "below-normal": _BELOW_NORMAL, "idle": _IDLE}
+    cls = classes.get(str(mode or "").strip().lower().replace("_", "-"))
+    if cls is None:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        # GetCurrentProcess returns the pseudo-handle (HANDLE)-1. Without an
+        # explicit prototype ctypes truncates it to c_int, which corrupts the
+        # handle and makes SetPriorityClass fail silently (this was a real bug
+        # here: the call returned falsy and the process stayed at NORMAL).
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.SetPriorityClass.restype = wintypes.BOOL
+        if k32.SetPriorityClass(k32.GetCurrentProcess(), cls):
+            return str(mode)
+        log.debug("SetPriorityClass(%s) failed: err=%d", mode,
+                  k32.GetLastError())
+    except Exception as e:
+        log.debug("could not set encode priority %r: %s", mode, e)
+    return None
+
+
 _ENC_OPTS: dict | None = None
 
 
 def _enc_init(opts: dict):
     """Process-pool initializer: stash the (picklable) encoding settings.
 
-    Also pins OpenCV to a single thread per worker. Measured effect on the
-    real book: none (0.81 -> 0.80 s/page at 8 workers), so this is hygiene
-    rather than an optimisation — it just keeps N workers from each starting
-    their own thread pool.
+    Also drops the worker to below-normal CPU priority and pins OpenCV to a
+    single thread. The cv2 pin is measurably a no-op (0.81 -> 0.80 s/page at
+    8 workers); it just stops N workers from each starting their own thread
+    pool. The priority drop is the part that matters to the person sitting at
+    the machine.
     """
     global _ENC_OPTS
-    _ENC_OPTS = opts
+    # `encode_priority` configures the worker, it is not an encoding setting,
+    # so it must not reach encode_page_payload(**opts).
+    _ENC_OPTS = {k: v for k, v in opts.items() if k != "encode_priority"}
+    apply_encode_priority(opts.get("encode_priority"))
     try:
         cv2.setNumThreads(1)
     except Exception:
         pass
+    # Reclaim this worker's scratch pair when the pool closes it. Doing it here
+    # (once per worker) rather than per page keeps the delete count at 2 x N
+    # instead of 2 x pages, and keeps each worker away from its siblings' files.
+    workdir = _ENC_OPTS.get("workdir")
+    if workdir:
+        import atexit
+
+        def _fini(wd=workdir):
+            try:
+                from src.mrc import cleanup_own_scratch
+                cleanup_own_scratch(wd)
+            except Exception:
+                pass
+
+        atexit.register(_fini)
 
 
 def _enc_worker(spec):
@@ -312,10 +422,20 @@ def _enc_worker(spec):
 
 
 def resolve_encode_workers(encode_workers) -> int:
-    """ "auto" -> half the logical CPUs (the encoder is a mix of a jbig2enc
-    subprocess, OpenCV and numpy, so leaving headroom helps)."""
+    """Resolve the worker count, leaving the desktop room to breathe.
+
+    "auto" is deliberately conservative: it keeps 2 *physical* cores spare,
+    so the UI keeps getting scheduled even in the middle of a book. Measured
+    on the real 24-page set, going 4 -> 8 workers bought only 0.87 -> 0.81
+    s/page (7%), so the headroom is close to free; using 8 workers on an
+    8-core CPU costs the user a responsive machine for 7%.
+    """
     if encode_workers in (None, "auto"):
-        return max(1, (os.cpu_count() or 4) // 2)
+        phys = physical_cores()
+        if phys and phys > 2:
+            return max(1, phys - 2)
+        # No Windows API to ask: assume SMT x2 and still keep 2 cores back.
+        return max(1, (os.cpu_count() or 4) // 2 - 2)
     return max(1, int(encode_workers))
 
 
@@ -325,7 +445,7 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
                 monochrome: str = "1bit",
                 jbig2_bin: str | None = None,
                 mrc_bg_scale="auto", mrc_bg_denoise="auto",
-                encode_workers="auto"):
+                encode_workers="auto", encode_priority="below-normal"):
     """Build a new PDF from processed page images.
 
     pages: list of dicts with keys width_pt, height_pt, ptype and EITHER
@@ -334,8 +454,15 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
       instead of holding every enhanced page in memory at once.
     encode_workers: number of processes used to encode pages, or "auto".
       Encoding is per-page independent and CPU-bound, so this is where a
-      long book spends most of its rebuild time. Pages given as in-memory
-      arrays are always encoded in-process (they would have to be pickled).
+      long book spends most of its rebuild time. "auto" keeps 2 physical
+      cores spare for the desktop (see resolve_encode_workers). Pages given
+      as in-memory arrays are always encoded in-process (they would have to
+      be pickled).
+    encode_priority: Windows CPU priority class for the worker processes —
+      "below-normal" (default) | "idle" | "normal" | None. Workers saturate
+      whatever cores they are given, so at normal priority a full book makes
+      the machine stutter; below-normal keeps the UI responsive and costs
+      nothing while the machine is idle.
     monochrome: "1bit" (default) or "jbig2" — encoding for bw-text pages.
       jbig2 is EXPERIMENTAL: PyMuPDF strips the /JBIG2Decode filter on save
       (MuPDF has no JBIG2 support), which corrupts the page (renders all
@@ -358,10 +485,20 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
     from src.ocr import insert_hidden_text_layer
 
     workdir = os.path.dirname(out_path)
+    # MRC/jbig2 leave pid-tagged scratch PNGs behind while encoding. They must
+    # not land next to the finished PDF: that litters output/ with ~10MB of
+    # `_mrc_in_<pid>.png` per run, and cleaning them up sweeps N workers' worth
+    # of files in one burst, which is enough to trip bulk-delete guards. Put
+    # them in the project temp dir and let each worker reclaim its own pair.
+    scratch = os.path.join(tempfile.gettempdir(), "pdfenhance_enc")
+    os.makedirs(scratch, exist_ok=True)
     pages = list(pages)
     opts = dict(jpeg_quality=jpeg_quality, monochrome=monochrome,
                 mrc_bg_scale=mrc_bg_scale, mrc_bg_denoise=mrc_bg_denoise,
-                jbig2_bin=jbig2_bin, workdir=workdir)
+                jbig2_bin=jbig2_bin, workdir=scratch)
+    # Worker setup needs everything `opts` has, plus the priority. Kept apart
+    # so the serial path can still call encode_page_payload(**opts) directly.
+    pool_opts = dict(opts, encode_priority=encode_priority)
 
     # --- encode (parallel when every page lives on disk) ---
     workers = resolve_encode_workers(encode_workers)
@@ -375,10 +512,10 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
             t_enc = time.time()
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_enc_init,
-                                     initargs=(opts,)) as ex:
+                                     initargs=(pool_opts,)) as ex:
                 payloads = list(ex.map(_enc_worker, specs, chunksize=2))
-            log.info("encoded %d pages on %d workers in %.1fs",
-                     len(pages), workers, time.time() - t_enc)
+            log.info("encoded %d pages on %d workers [priority=%s] in %.1fs",
+                     len(pages), workers, encode_priority, time.time() - t_enc)
         except Exception as e:
             log.warning("parallel encode unavailable (%s); encoding serially", e)
             payloads = None
@@ -407,7 +544,7 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
     doc.close()
     before = os.path.getsize(out_path)
     from src.mrc import cleanup_threshold_files
-    cleanup_threshold_files(workdir)
+    cleanup_threshold_files(scratch)
 
     # Sanity check for the experimental jbig2 path: PyMuPDF strips
     # /JBIG2Decode on save, so the raw JBIG2 stream is misread as Flate data

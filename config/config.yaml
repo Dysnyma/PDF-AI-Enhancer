@@ -71,11 +71,21 @@ compression:
                       # 0.24%，渐变与大插图不受影响。
                       # auto: gray-text→5（纯纸面），mixed/color-text→0（保插图）。
   encode_workers: auto
-                      # 逐页编码的并行进程数：auto（= 逻辑核数一半）| 1（串行）
-                      # 编码是逐页独立且纯 CPU 的（MRC 分割约 8s/页），实测占整本
-                      # 重建时间的大头：旧全本 104 min 里重建 45.5 min，而 GPU 增强
-                      # 只有 19 min。改为多进程后重建时间按核数下降。
+                      # 逐页编码的并行进程数：auto | 1（串行）| 任意整数
+                      # 编码是逐页独立且纯 CPU 的，实测占整本耗时的大头：旧全本
+                      # 104 min 里重建 45.5 min，而 GPU 增强只有 19 min。
+                      # auto = **物理核数 - 2**（本机 8c/16t → 6），刻意留 2 个
+                      # 物理核给桌面。别用"逻辑核数一半"：本机 16/2 = 8 = 全部物理核，
+                      # 整机被占满时电脑会明显卡顿。实测 4→8 进程只快 7%
+                      # （0.87→0.81 s/页），留出余量基本不亏。
                       # 页图以内存数组传入时（脚本单页演示）自动串行——避免 pickle。
+  encode_priority: below-normal
+                      # 编码 worker 进程的 CPU 优先级：below-normal（默认）| idle
+                      # | normal | null（不改）
+                      # worker 会把分到的核跑满，NORMAL 优先级下它和你的前台程序
+                      # 平分时间片 → 整本跑起来电脑发卡。降到 below-normal 后：
+                      # 你不动电脑时 worker 仍是唯一可运行线程（速度几乎无损），
+                      # 你一操作系统立刻把 CPU 让给你。这比"干脆少开几个进程"划算。
 
 gpu:
   device: auto        # auto | cuda | cpu
