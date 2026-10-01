@@ -36,12 +36,16 @@ def _page_nominal_dpi(page) -> float:
     return best
 
 
-def render_pdf_pages(pdf_path: str, dpi=300, max_dpi: int = 450):
-    """Render every page of a PDF to BGR numpy arrays.
+def render_pdf_pages(pdf_path: str, dpi=300, max_dpi: int = 450,
+                     page_range: tuple[int, int] | None = None):
+    """Render pages of a PDF to BGR numpy arrays.
 
     dpi: int, or "auto" — per page, render at the embedded scan's own nominal
     DPI (zero interpolation: one output pixel per scan pixel), clamped to
     [72, max_dpi]. Vector pages without raster images fall back to 300.
+
+    page_range: optional (start, end) inclusive 0-based page indexes; when
+    given, only those pages are rendered (end clamped to the last page).
 
     Returns list of dicts: {index, image (BGR ndarray), width_pt, height_pt, dpi}
     """
@@ -49,7 +53,15 @@ def render_pdf_pages(pdf_path: str, dpi=300, max_dpi: int = 450):
     auto = isinstance(dpi, str) and dpi.lower() == "auto"
     pages = []
     dpi_stats: dict[int, int] = {}
-    for i, page in enumerate(doc):
+    if page_range is not None:
+        start, end = page_range
+        start = max(0, int(start))
+        end = min(doc.page_count - 1, int(end))
+        idxs = range(start, end + 1)
+    else:
+        idxs = range(doc.page_count)
+    for i in idxs:
+        page = doc[i]
         if auto:
             nominal = _page_nominal_dpi(page)
             if nominal <= 0:
@@ -102,7 +114,8 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
                 text_layers: dict[int, list[dict]] | None = None,
                 font_file: str | None = None,
                 monochrome: str = "1bit",
-                jbig2_bin: str | None = None):
+                jbig2_bin: str | None = None,
+                mrc_bg_scale="auto", mrc_bg_denoise="auto"):
     """Build a new PDF from processed page images.
 
     pages: list of dicts with keys image (BGR), width_pt, height_pt, ptype.
@@ -110,6 +123,18 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
       jbig2 is EXPERIMENTAL: PyMuPDF strips the /JBIG2Decode filter on save
       (MuPDF has no JBIG2 support), which corrupts the page (renders all
       black). A post-save validation reverts such output to the 1-bit path.
+    mrc_bg_scale: MRC background-plane downsampling factor — "auto" | int.
+      "auto" picks 2 for every text page: the render pipeline runs at the
+      source's effective DPI, so a factor of 2 puts the background back at
+      exactly the resolution of the original scan — everything beyond that
+      is SR interpolation and carries no real information. 1 disables
+      downsampling.
+    mrc_bg_denoise: odd median-kernel size for the background — "auto" | int.
+      "auto" applies 5 on gray-text pages: the residual background is mostly
+      per-pixel noise injected by the SR, which costs JPEG bytes and buys
+      nothing; median filtering it is a ~2.5x background saving and a
+      visibly cleaner paper tone. Figure-bearing pages (mixed/color-text)
+      keep 0 so the figure is untouched.
     text_layers: optional {page_index: [spans]} of OCR text (invisible).
     Physical page size is preserved, so effective DPI rises with SR.
     """
@@ -144,9 +169,16 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
             # compared at their Flate-compressed size (raw packing is
             # ~5.6 MB/page each; zlib ~0.3 MB).
             from src.mrc import encode_mrc, embed_mrc
+            scale = mrc_bg_scale
+            if scale == "auto":
+                scale = 2
+            denoise = mrc_bg_denoise
+            if denoise == "auto":
+                denoise = 5 if ptype == "gray-text" else 0
             mrc = encode_mrc(p["image"], jpeg_quality,
                              bg_gray=(ptype == "gray-text"),
-                             jbig2_bin=jbig2_bin, workdir=workdir)
+                             jbig2_bin=jbig2_bin, workdir=workdir,
+                             bg_scale=int(scale), bg_denoise=int(denoise))
             jpg = encode_page_image(p["image"], ptype, jpeg_quality)
             if mrc[0] is not None and mrc[1]:
                 z_est = sum(len(zlib.compress(pk, 6)) for pk, _ in mrc[1])
@@ -166,6 +198,8 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
 
     doc.save(out_path, deflate=True, garbage=3)
     doc.close()
+    from src.mrc import cleanup_threshold_files
+    cleanup_threshold_files(workdir)
 
     # Sanity check for the experimental jbig2 path: PyMuPDF strips
     # /JBIG2Decode on save, so the raw JBIG2 stream is misread as Flate data

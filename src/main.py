@@ -45,6 +45,9 @@ def main():
                         help="also export page PNGs to output/<name>_images/")
     parser.add_argument("--dpi", default=None,
                         help="render DPI (int, or 'auto' = per-page native scan DPI)")
+    parser.add_argument("--pages", default=None,
+                        help="page range to process: '50' (first 50) or '10-59' "
+                             "(1-based inclusive)")
     parser.add_argument("--list-backends", action="store_true",
                         help="list available restore/SR backends and exit")
     args = parser.parse_args()
@@ -96,6 +99,16 @@ def main():
         print("no input PDF found (put files in input/ or pass a path)")
         sys.exit(1)
 
+    # parse page range (1-based inclusive, or a bare count = first N pages)
+    page_range = None
+    if args.pages:
+        spec = str(args.pages).strip()
+        if "-" in spec:
+            a, b = spec.split("-", 1)
+            page_range = (int(a) - 1, int(b) - 1)
+        else:
+            page_range = (0, int(spec) - 1)
+
     os.makedirs(os.path.join(PROJECT_ROOT, "output"), exist_ok=True)
 
     from src.pipeline import EnhancePipeline
@@ -112,7 +125,8 @@ def main():
         out_pdf = os.path.join(PROJECT_ROOT, "output", f"{name}_enhanced.pdf")
         img_dir = os.path.join(PROJECT_ROOT, "output", f"{name}_images") \
             if args.save_images else None
-        pipe.process_pdf(pdf, out_pdf, save_images_dir=img_dir)
+        pipe.process_pdf(pdf, out_pdf, save_images_dir=img_dir,
+                         page_range=page_range)
 
     print("done.")
 

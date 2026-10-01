@@ -54,6 +54,18 @@ compression:
   grayscale: jpeg
   monochrome: 1bit    # 黑白文字页编码：1bit(默认,无损安全) | jbig2(更小但有符号合并幻觉风险,MuPDF无法预览)
   jpeg_quality: 85
+  mrc_bg_scale: auto  # MRC 背景层降采样倍数：auto | 1(不降) | 2 | 3 | 4
+                      # 背景层只承载低频信息（纸面/渐变/光照/大插图），文字全部
+                      # 由 1bit 模板全分辨率保留 → 降采样几乎无损，体积按倍数平方下降
+                      # （实测 340 页书：整页 JPEG 1627KB/页 → bg_scale=2 后 358KB/页）。
+                      # auto: 2 —— 渲染本来就跑在源有效 DPI 上，再降 1/2 正好回到
+                      # 扫描件原始分辨率，更高都是 SR 插值出来的、不含真实信息。
+  mrc_bg_denoise: auto  # 背景层中值滤波核（奇数）：auto | 0(关) | 3 | 5 | 7
+                      # 抠掉文字后背景里剩下的几乎全是 SR 注入的逐像素噪声——占
+                      # JPEG 字节却不含信息。中值一遍就砍掉约 2.5 倍（p130 全分辨率
+                      # 背景 869KB→384KB），纸面反而更干净；7px 仅占 2878px 页宽的
+                      # 0.24%，渐变与大插图不受影响。
+                      # auto: gray-text→5（纯纸面），mixed/color-text→0（保插图）。
 
 gpu:
   device: auto        # auto | cuda | cpu

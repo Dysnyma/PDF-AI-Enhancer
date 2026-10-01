@@ -15,6 +15,15 @@ from src.ocr import (RapidOCRBackend, boxes_to_pdf_text,
 log = logging.getLogger("pdfenhance")
 
 
+class Cancelled(Exception):
+    """Raised when a caller-requested cancel is detected mid-pipeline.
+
+    The caller passes ``should_stop`` (a zero-arg callable) to ``process_pdf``;
+    the pipeline checks it between pages and aborts early so a long全本 run can
+    be stopped from the GUI without killing the process.
+    """
+
+
 def _build_stage_backend(registry, name, project_root, stage_cfg, device, fp16):
     """Instantiate a backend by name using its own defaults.
 
@@ -34,8 +43,8 @@ def _build_stage_backend(registry, name, project_root, stage_cfg, device, fp16):
 
     params = dict(cls.default_params)
     for k, v in stage_cfg.items():
-        if k in ("backend", "enabled", "weights"):
-            continue
+        if k in ("backend", "enabled", "weights", "routing"):
+            continue  # pipeline-level keys, not backend constructor params
         params[k] = v  # config may override defaults or add backend-specific keys
 
     weights_name = stage_cfg.get("weights") or cls.default_weights
@@ -114,11 +123,15 @@ class EnhancePipeline:
             log.info("VRAM before run: %.1f GB free / %.1f GB", free / 1024**3, total / 1024**3)
 
     def process_pdf(self, pdf_path: str, out_path: str,
-                    save_images_dir: str | None = None):
+                    save_images_dir: str | None = None,
+                    page_range: tuple[int, int] | None = None,
+                    should_stop=None):
         cfg = self.cfg
         t0 = time.time()
         pages = render_pdf_pages(pdf_path, cfg["render"].get("dpi", 300),
-                                 int(cfg["render"].get("max_dpi", 450)))
+                                 int(cfg["render"].get("max_dpi", 450)),
+                                 page_range=page_range)
+        log.info("render: %d pages ready", len(pages))
 
         temp_dir = None
         if cfg.get("debug", {}).get("keep_temp", False):
@@ -134,7 +147,10 @@ class EnhancePipeline:
         if self.ocr is not None:
             log.info("OCR pass @ %d DPI (%d pages)", self.ocr_dpi, n_pages)
             t_ocr = time.time()
-            for i in range(n_pages):
+            for p in pages:
+                if should_stop is not None and should_stop():
+                    raise Cancelled()
+                i = p["index"]
                 img, zoom = render_page_for_ocr(pdf_path, i, self.ocr_dpi)
                 boxes = self.ocr.recognize(img)
                 text_layers[i] = boxes_to_pdf_text(boxes, zoom)
@@ -142,6 +158,8 @@ class EnhancePipeline:
             log.info("OCR done in %.1fs", time.time() - t_ocr)
 
         for p in pages:
+            if should_stop is not None and should_stop():
+                raise Cancelled()
             i = p["index"]
             img = p["image"]
             t_page = time.time()
@@ -186,12 +204,22 @@ class EnhancePipeline:
 
         q = int(cfg["compression"].get("jpeg_quality", 85))
         mono = cfg["compression"].get("monochrome", "1bit")
+        bg_scale = cfg["compression"].get("mrc_bg_scale", "auto")
+        bg_denoise = cfg["compression"].get("mrc_bg_denoise", "auto")
         jbig2_bin = os.path.join(self.project_root, "tools", "jbig2", "jbig2.exe")
+        log.info("rebuild: encoding %d pages [quality=%d monochrome=%s bg_scale=%s bg_denoise=%s] -> %s",
+                 len(out_pages), q, mono, bg_scale, bg_denoise, os.path.basename(out_path))
+        # jbig2_bin is handed to rebuild_pdf unconditionally: MRC's text
+        # segmentation (leptonica adaptive threshold) needs it regardless of
+        # how bw-text pages are encoded. rebuild_pdf only uses it for the
+        # *encoding* of bw-text pages when monochrome == "jbig2".
         rebuild_pdf(out_pages, out_path, jpeg_quality=q,
                     text_layers=text_layers if self.ocr is not None else None,
                     font_file=self.ocr_font if self.ocr is not None else None,
                     monochrome=mono,
-                    jbig2_bin=jbig2_bin if mono == "jbig2" else None)
+                    mrc_bg_scale=bg_scale,
+                    mrc_bg_denoise=bg_denoise,
+                    jbig2_bin=jbig2_bin)
 
         if save_images_dir:
             os.makedirs(save_images_dir, exist_ok=True)

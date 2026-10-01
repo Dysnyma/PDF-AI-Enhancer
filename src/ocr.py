@@ -100,18 +100,28 @@ def insert_hidden_text_layer(page, spans: list[dict], font_file: str | None = No
     visual appearance, but stays selectable and searchable (Ctrl+F).
     font_file should point to a CJK-capable font (e.g. simsun.ttc); without it
     non-Latin text degrades to '?' because the builtin helv font is Latin-only.
+
+    IMPORTANT: uses insert_text (anchored at the OCR box origin), NOT
+    insert_textbox. insert_textbox re-flows the text into the box — when the
+    glyph run is wider than the box at the computed fontsize it silently
+    wraps/drops characters, so the searchable text no longer lines up with
+    the scan (the classic "文字错位/缺字" symptom). insert_text places the
+    whole run verbatim from the anchor at a fixed size, so each span stays
+    exactly where the OCR detector found it.
     """
+    fontsize_cap = 60.0  # guard against a degenerate giant box
     for s in spans:
         x0, y0, x1, y1 = s["bbox"]
-        rect = fitz.Rect(x0, y0, x1, y1)
-        # Small fixed-ish size so text reliably fits the (possibly narrow)
-        # OCR box; render_mode=3 hides it anyway, so exact size is cosmetic.
-        # A too-large size makes insert_textbox silently drop the text.
-        fontsize = max(2.0, (y1 - y0) * 0.55)
+        # Baseline anchor: left edge, bottom edge of the box. Font size =
+        # box height so the glyphs match the scan's real text height.
+        fontsize = max(2.0, min(y1 - y0, fontsize_cap))
+        # insert_text's point is the baseline origin of the first glyph.
+        # y1 is the box bottom; use it directly as the baseline (a hair of
+        # ascender overflow above is harmless for an invisible layer).
+        point = fitz.Point(x0, y1)
         kwargs = dict(
             fontsize=fontsize,
             render_mode=3,     # invisible
-            align=fitz.TEXT_ALIGN_LEFT,
         )
         if font_file and os.path.isfile(font_file):
             kwargs["fontfile"] = font_file
@@ -119,14 +129,6 @@ def insert_hidden_text_layer(page, spans: list[dict], font_file: str | None = No
         else:
             kwargs["fontname"] = "helv"
         try:
-            # NOTE: 2nd positional arg is `buffer` (the text), not `text`.
-            # insert_textbox returns the unused height (negative if text
-            # overflows); retry with a shrinking size so nothing is dropped.
-            ret = page.insert_textbox(rect, s["text"], **kwargs)
-            attempt = 0
-            while ret < 0 and attempt < 4:
-                attempt += 1
-                kwargs["fontsize"] = kwargs["fontsize"] * 0.6
-                ret = page.insert_textbox(rect, s["text"], **kwargs)
-        except Exception as e:  # box too small / odd geometry -> skip
-            log.debug("skip textbox %r: %s", s["text"], e)
+            page.insert_text(point, s["text"], **kwargs)
+        except Exception as e:  # bad geometry / empty text -> skip
+            log.debug("skip text %r: %s", s["text"], e)
