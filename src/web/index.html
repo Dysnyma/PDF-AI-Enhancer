@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF AI 增强工具</title>
+<style>
+  :root{
+    --bg:#f3f4f6; --panel:#ffffff; --panel-2:#fafbfc; --line:#e5e7eb;
+    --text:#111827; --muted:#6b7280; --faint:#9ca3af;
+    --brand:#4f46e5; --brand-2:#7c3aed; --brand-soft:#eef2ff;
+    --ok:#059669; --ok-soft:#ecfdf5;
+    --warn:#d97706; --warn-soft:#fffbeb;
+    --err:#dc2626; --err-soft:#fef2f2;
+    --info:#2563eb; --info-soft:#eff6ff;
+    --shadow:0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.1);
+    --radius:14px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--text); font-size:14px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{display:flex; min-height:100vh}
+
+  /* ---------- sidebar ---------- */
+  .sidebar{
+    width:236px; flex:0 0 236px; background:var(--panel);
+    border-right:1px solid var(--line); display:flex; flex-direction:column;
+    position:sticky; top:0; height:100vh;
+  }
+  .brand{display:flex; align-items:center; gap:10px; padding:20px 18px 16px}
+  .brand-logo{
+    width:38px;height:38px;border-radius:10px;flex:0 0 38px;
+    background:linear-gradient(135deg,var(--brand),var(--brand-2));
+    display:flex;align-items:center;justify-content:center;color:#fff;
+    box-shadow:0 4px 10px rgba(79,70,229,.3);
+  }
+  .brand-text b{display:block;font-size:15px;letter-spacing:.2px}
+  .brand-text span{font-size:11px;color:var(--muted)}
+  nav{padding:8px; display:flex; flex-direction:column; gap:2px}
+  .nav-item{
+    display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;
+    background:none;border:none;cursor:pointer;color:var(--muted);font-size:13.5px;
+    font-family:inherit;text-align:left;width:100%;transition:.14s;
+  }
+  .nav-item:hover{background:var(--panel-2);color:var(--text)}
+  .nav-item.active{background:var(--brand-soft);color:var(--brand);font-weight:600}
+  .nav-item svg{flex:0 0 18px}
+  .nav-badge{
+    margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:10px;
+    background:var(--brand);color:#fff;font-size:11px;display:none;
+    align-items:center;justify-content:center;font-weight:600;
+  }
+  .sidebar-foot{
+    margin-top:auto;padding:14px 18px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--muted);display:flex;flex-direction:column;gap:6px;
+  }
+  .srv{display:flex;align-items:center;gap:7px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+  .dot.off{background:var(--err);box-shadow:0 0 0 3px var(--err-soft)}
+
+  /* ---------- main ---------- */
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .topbar{
+    background:rgba(255,255,255,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line); padding:16px 26px;
+    display:flex;align-items:center;gap:16px; position:sticky;top:0;z-index:20;
+  }
+  .topbar h1{font-size:18px;font-weight:650}
+  .topbar p{font-size:12.5px;color:var(--muted);margin-top:1px}
+  .top-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+
+  .view{display:none;padding:22px 26px 40px;max-width:1180px;width:100%}
+  .view.active{display:block}
+
+  /* ---------- buttons ---------- */
+  .btn{
+    border:1px solid var(--line);background:var(--panel);color:var(--text);
+    border-radius:9px;padding:7px 14px;font-size:13px;cursor:pointer;
+    font-family:inherit;display:inline-flex;align-items:center;gap:6px;
+    transition:.14s;white-space:nowrap;
+  }
+  .btn:hover{background:var(--panel-2);border-color:#d1d5db}
+  .btn.primary{background:linear-gradient(135deg,var(--brand),var(--brand-2));border:none;color:#fff;box-shadow:0 2px 6px rgba(79,70,229,.28)}
+  .btn.primary:hover{filter:brightness(1.06)}
+  .btn.danger{color:var(--err);border-color:#fecaca;background:var(--err-soft)}
+  .btn.danger:hover{background:#fee2e2}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--brand)}
+  .btn.ghost:hover{background:var(--brand-soft)}
+  .btn.sm{padding:4px 10px;font-size:12px}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+
+  /* ---------- cards ---------- */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow);margin-bottom:16px}
+  .card h2{font-size:14px;font-weight:650;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+
+  /* stats */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+  .stat .n{font-size:24px;font-weight:700;letter-spacing:-.5px}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:2px}
+  .stat.p .n{color:var(--brand)}
+  .stat.g .n{color:var(--ok)}
+  .stat.b .n{color:var(--info)}
+
+  /* drop */
+  #drop{
+    border:2px dashed var(--line);border-radius:12px;padding:26px;text-align:center;
+    color:var(--muted);cursor:pointer;transition:.16s;background:var(--panel-2);
+  }
+  #drop:hover{border-color:#c7d2fe;background:#f8f9ff}
+  #drop.drag{border-color:var(--brand);background:var(--brand-soft);color:var(--brand)}
+  #drop .big{font-size:15px;font-weight:600;color:var(--text)}
+  #drop.drag .big{color:var(--brand)}
+  #drop input{display:none}
+  #drop .sub{font-size:12px;margin-top:4px}
+
+  /* job card */
+  .job{border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px;background:var(--panel);box-shadow:var(--shadow);transition:.16s}
+  .job.running{border-color:#c7d2fe;box-shadow:0 0 0 3px rgba(79,70,229,.08)}
+  .job-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .job-name{font-weight:650;flex:1;min-width:160px;word-break:break-all;font-size:14.5px}
+  .badge{font-size:11.5px;padding:3px 10px;border-radius:20px;white-space:nowrap;font-weight:600}
+  .badge.draft{background:#f3f4f6;color:var(--muted)}
+  .badge.queued{background:#f3f4f6;color:var(--muted)}
+  .badge.running{background:var(--info-soft);color:var(--info)}
+  .badge.done{background:var(--ok-soft);color:var(--ok)}
+  .badge.error{background:var(--err-soft);color:var(--err)}
+  .badge.stopped{background:var(--warn-soft);color:var(--warn)}
+
+  /* stepper */
+  .steps{display:flex;gap:0;margin:14px 0 6px;flex-wrap:wrap}
+  .step{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--faint);padding-right:6px}
+  .step .dot2{width:18px;height:18px;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:10px;background:#fff;flex:0 0 18px}
+  .step.done{color:var(--ok)}
+  .step.done .dot2{background:var(--ok);border-color:var(--ok);color:#fff}
+  .step.active{color:var(--brand);font-weight:650}
+  .step.active .dot2{border-color:var(--brand);background:var(--brand);color:#fff;animation:pulse 1.3s infinite}
+  .step-line{flex:0 0 18px;height:2px;background:var(--line);margin:0 2px;border-radius:2px}
+  .step-line.done{background:var(--ok)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(79,70,229,.45)}70%{box-shadow:0 0 0 7px rgba(79,70,229,0)}100%{box-shadow:0 0 0 0 rgba(79,70,229,0)}}
+
+  .progress{height:7px;background:#eef0f3;border-radius:4px;margin-top:6px;overflow:hidden}
+  .progress .bar{height:100%;background:linear-gradient(90deg,var(--brand),var(--brand-2));width:0%;border-radius:4px;transition:width .4s}
+  .job-meta{font-size:12px;color:var(--muted);margin-top:8px;display:flex;gap:14px;flex-wrap:wrap}
+
+  /* params */
+  .param-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+  .field{display:flex;flex-direction:column;gap:3px}
+  .field label{font-size:11.5px;color:var(--muted);font-weight:500}
+  .field input,.field select{
+    padding:6px 9px;border:1px solid var(--line);border-radius:8px;font-size:13px;
+    font-family:inherit;background:#fff;color:var(--text);
+  }
+  .field input:focus,.field select:focus{outline:2px solid var(--brand-soft);border-color:var(--brand)}
+  details.adv{margin-top:10px;border-top:1px dashed var(--line);padding-top:10px}
+  details.adv summary{cursor:pointer;font-size:12.5px;color:var(--brand);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px}
+  details.adv summary::-webkit-details-marker{display:none}
+  details.adv summary::before{content:"▸";transition:.15s}
+  details.adv[open] summary::before{transform:rotate(90deg)}
+
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
+
+  .log{
+    background:#0e1526;color:#c3ccdd;border-radius:10px;padding:12px 14px;
+    font-family:"Cascadia Code","Consolas",monospace;font-size:11.5px;
+    max-height:220px;overflow-y:auto;margin-top:12px;white-space:pre-wrap;
+    display:none;line-height:1.5;
+  }
+  .log.show{display:block}
+  .log .ok{color:#6ee7b7}
+  .log .er{color:#fca5a5}
+
+  .result{margin-top:12px;font-size:13px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .result .grid{display:flex;gap:22px;flex-wrap:wrap}
+  .result b{color:var(--brand);font-size:15px}
+  .result .down{color:var(--ok)}
+
+  /* compare */
+  .cmp-scroll{overflow:auto;max-height:70vh;border-radius:10px;border:1px solid var(--line);background:#f9fafb}
+  .cmp-stage{position:relative;display:inline-block;width:var(--zw,100%);line-height:0;user-select:none;touch-action:none}
+  .cmp-img{display:block;width:100%;height:auto}
+  .cmp-enh{position:absolute;inset:0;clip-path:inset(0 0 0 var(--pos,50%))}
+  .cmp-handle{position:absolute;top:0;bottom:0;left:var(--pos,50%);width:3px;background:var(--brand);transform:translateX(-1.5px);cursor:ew-resize;z-index:5}
+  .cmp-handle-knob{
+    position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    width:34px;height:34px;border-radius:50%;background:var(--brand);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-size:15px;
+    box-shadow:0 2px 8px rgba(0,0,0,.3);pointer-events:none;
+  }
+  .cmp-tag{position:absolute;top:10px;font-size:11.5px;background:rgba(17,24,39,.78);color:#fff;padding:3px 10px;border-radius:20px;line-height:1.4;z-index:4}
+  .cmp-tag.left{left:10px}
+  .cmp-tag.right{right:10px}
+  .cmp-hint{font-size:12px;color:var(--muted);margin-top:10px;text-align:center}
+  .zoom{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:9px;padding:2px}
+  .zoom button{border:none;background:none;width:26px;height:26px;border-radius:7px;cursor:pointer;font-size:15px;color:var(--text)}
+  .zoom button:hover{background:var(--panel-2)}
+  .zoom span{font-size:12px;color:var(--muted);min-width:44px;text-align:center}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .row label{font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .row select,.row input[type=number]{padding:6px 9px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;background:#fff}
+  .spacer{flex:1}
+
+  .empty{color:var(--muted);text-align:center;padding:26px;font-size:13px}
+  .about p{font-size:13px;color:var(--muted);margin-bottom:8px}
+  .about code{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12px}
+  .kbd{background:var(--panel-2);border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:1px 6px;font-size:11.5px;font-family:monospace}
+
+  /* toast */
+  #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:#111827;color:#fff;
+    padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:.25s;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{background:var(--err)}
+  #toast.ok{background:var(--ok)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+      </div>
+      <div class="brand-text"><b>PDF Enhancer</b><span>扫描件 AI 画质增强</span></div>
+    </div>
+    <nav>
+      <button class="nav-item active" data-view="queue">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        任务队列 <span class="nav-badge" id="nav-badge">0</span>
+      </button>
+      <button class="nav-item" data-view="compare">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>
+        对比查看
+      </button>
+      <button class="nav-item" data-view="settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        高级设置
+      </button>
+      <button class="nav-item" data-view="about">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        关于
+      </button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="srv"><span class="dot" id="srv-dot"></span><span id="srv-text">已连接</span></div>
+      <div id="ver-text">v0.2 · 本地运行</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="view-title">任务队列</h1>
+        <p id="view-sub">拖入扫描版 PDF → 设置参数 → 开始增强</p>
+      </div>
+      <div class="top-actions" id="top-actions">
+        <button class="btn" id="btn-pick">选择文件</button>
+        <button class="btn primary" id="btn-start-all">开始全部</button>
+        <button class="btn" id="btn-stop-all">全部停止</button>
+        <button class="btn ghost" id="btn-clear">清空已完成</button>
+      </div>
+    </header>
+
+    <!-- ============ 队列 ============ -->
+    <section id="view-queue" class="view active">
+      <div class="stats">
+        <div class="stat p"><div class="n" id="st-all">0</div><div class="l">任务总数</div></div>
+        <div class="stat b"><div class="n" id="st-run">0</div><div class="l">进行中</div></div>
+        <div class="stat"><div class="n" id="st-wait">0</div><div class="l">排队中</div></div>
+        <div class="stat g"><div class="n" id="st-done">0</div><div class="l">已完成</div></div>
+      </div>
+
+      <div class="card">
+        <div id="drop">
+          <div class="big">点击或拖拽 PDF 到此处</div>
+          <div class="sub">支持多本批量添加 · 处理在本机进行，不上传云端</div>
+          <input type="file" id="file" multiple accept=".pdf">
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>任务列表</h2>
+        <div id="jobs"></div>
+        <div class="empty" id="jobs-empty">暂无任务，先拖入 PDF</div>
+      </div>
+    </section>
+
+    <!-- ============ 对比 ============ -->
+    <section id="view-compare" class="view">
+      <div class="card">
+        <div class="row">
+          <label>任务 <select id="cmp-job" style="min-width:220px"></select></label>
+          <label>页码 <input type="number" id="cmp-page" value="1" min="1" style="width:80px"></label>
+          <button class="btn primary" id="cmp-load">加载对比</button>
+          <span class="spacer"></span>
+          <div class="zoom">
+            <button id="cmp-zoom-out" title="缩小">−</button><span id="cmp-zoom-val">100%</span><button id="cmp-zoom-in" title="放大">+</button>
+          </div>
+          <button class="btn ghost" id="cmp-download">下载对比图</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="cmp-scroll">
+          <div class="cmp-stage" id="cmp-stage">
+            <img id="cmp-img-orig" class="cmp-img" alt="原书">
+            <img id="cmp-img-enh" class="cmp-img cmp-enh" alt="增强">
+            <div class="cmp-handle" id="cmp-handle"><div class="cmp-handle-knob">⇔</div></div>
+            <span class="cmp-tag left">原书（左）</span>
+            <span class="cmp-tag right">增强（右）</span>
+          </div>
+          <div class="empty" id="cmp-empty">选择一本已完成的任务并点击「加载对比」</div>
+        </div>
+        <div class="cmp-hint">拖动中间滑块左右对比 · 用 +/− 缩放</div>
+      </div>
+    </section>
+
+    <!-- ============ 设置 ============ -->
+    <section id="view-settings" class="view">
+      <div class="card">
+        <h2>默认参数（应用于新添加的任务）</h2>
+        <div class="param-grid" id="settings-grid"></div>
+        <div class="controls">
+          <button class="btn primary" id="btn-save-settings">保存为默认</button>
+          <button class="btn" id="btn-reset-settings">恢复默认</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>可用后端</h2>
+        <div class="about" id="backends-info">加载中…</div>
+      </div>
+    </section>
+
+    <!-- ============ 关于 ============ -->
+    <section id="view-about" class="view">
+      <div class="card about">
+        <h2>PDF AI 增强工具 <span style="color:var(--muted);font-weight:400;font-size:12px" id="about-ver"></span></h2>
+        <p>扫描版 PDF 画质增强：<b>DocRes 去阴影/修复</b> → <b>超分辨率</b> → <b>MRC 分层压缩</b>，全程 Windows 原生、项目内隔离，不上云。</p>
+        <p>OCR 文字层默认关闭——推荐用 ABBYY FineReader 手动对增强后的 PDF 加文字层，中文识别更准。</p>
+        <p>常用操作：拖入多本 PDF 排队 · 每本单独设参数 · 完成后在「对比查看」里拖动滑块看效果。</p>
+        <p>输出目录：<code id="about-out">output/</code> ·
+           <button class="btn sm ghost" id="btn-open-out">打开输出文件夹</button></p>
+        <p class="kbd">停止服务：关闭启动脚本的黑色窗口，或在窗口里按 Ctrl+C</p>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const jobsEl = $('#jobs');
+
+/* ---------------- 状态 ---------------- */
+const STORE_KEY = 'pdfenhancer.settings.v1';
+let defaults = {scale:2,quality:85,ocr:false,restore_enabled:true,restore_backend:'docres',
+  sr_enabled:true,sr_backend:'realesrgan-general',routing:'off',dpi:'auto',device:'auto',
+  monochrome:'1bit',fp16:true};
+let settings = Object.assign({}, defaults, loadStore());
+let pv = {};            // 每任务参数覆盖
+const sigs = {};        // 每任务渲染签名
+const logText = {};     // 每任务累积日志文本
+const logOffsets = {};  // 每任务已拉取日志行数
+let cmpHolder = {orig:null, enh:null, name:'', page:1};
+
+const statusText = {draft:'待设置',queued:'排队中',running:'处理中',done:'完成',error:'失败',stopped:'已停止'};
+const STAGE_LABEL = {render:'渲染',ocr:'OCR',enhance:'修复·超分',rebuild:'重建',done:'完成'};
+
+function loadStore(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY)||'{}'); }catch(e){ return {}; } }
+function saveStore(){ localStorage.setItem(STORE_KEY, JSON.stringify(settings)); }
+
+/* ---------------- 视图切换 ---------------- */
+const VIEW_META = {
+  queue:['任务队列','拖入扫描版 PDF → 设置参数 → 开始增强'],
+  compare:['对比查看','拖动滑块对比原书与增强后的画质'],
+  settings:['高级设置','调整默认参数与查看可用后端'],
+  about:['关于','工具说明']
+};
+document.querySelectorAll('.nav-item').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    document.querySelectorAll('.nav-item').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    const v = b.dataset.view;
+    document.querySelectorAll('.view').forEach(s=>s.classList.remove('active'));
+    $('#view-'+v).classList.add('active');
+    $('#view-title').textContent = VIEW_META[v][0];
+    $('#view-sub').textContent = VIEW_META[v][1];
+    $('#top-actions').style.display = (v==='queue') ? 'flex' : 'none';
+    if(v==='compare') refreshCompareJobs();
+  });
+});
+
+function toast(msg, kind){
+  const t = $('#toast'); t.textContent = msg;
+  t.className = 'show' + (kind ? ' '+kind : '');
+  clearTimeout(t._tm); t._tm = setTimeout(()=>{ t.className=''; }, 2400);
+}
+
+/* ---------------- 拖拽 / 上传 ---------------- */
+const drop = $('#drop'), fileInput = $('#file');
+drop.addEventListener('click', ()=>fileInput.click());
+drop.addEventListener('dragover', e=>{ e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', ()=>drop.classList.remove('drag'));
+drop.addEventListener('drop', e=>{ e.preventDefault(); drop.classList.remove('drag'); uploadFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', ()=>{ uploadFiles(fileInput.files); fileInput.value=''; });
+$('#btn-pick').addEventListener('click', async ()=>{
+  try{
+    const r = await fetch('/api/pick',{method:'POST'});
+    const j = await r.json();
+    if(j.paths && j.paths.length){ addPaths(j.paths); }
+    else if(j.error){ toast('无法打开文件选择框：'+j.error,'err'); }
+  }catch(e){ toast('选择失败','err'); }
+});
+
+async function uploadFiles(files){
+  let n = 0;
+  for(const f of files){
+    if(!f.name.toLowerCase().endsWith('.pdf')) continue;
+    const fd = new FormData(); fd.append('file', f);
+    try{
+      const r = await fetch('/api/upload',{method:'POST',body:fd});
+      const j = await r.json();
+      if(j.pdf_path){ await addPaths([j.pdf_path]); n++; }
+    }catch(e){ toast('上传失败：'+f.name,'err'); }
+  }
+  if(n) toast(`已添加 ${n} 个任务`,'ok');
+  refresh();
+}
+
+async function addPaths(paths){
+  for(const p of paths){
+    await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(Object.assign({}, settings, {pdf_path:p, start:false}))});
+  }
+}
+
+/* ---------------- 轮询 ---------------- */
+let serverOk = true;
+async function refresh(){
+  let jobs;
+  try{
+    const r = await fetch('/api/jobs');
+    jobs = await r.json();
+    if(!serverOk){ serverOk=true; $('#srv-dot').classList.remove('off'); $('#srv-text').textContent='已连接'; }
+  }catch(e){
+    serverOk=false; $('#srv-dot').classList.add('off'); $('#srv-text').textContent='连接断开';
+    return;
+  }
+  renderStats(jobs);
+  renderJobs(jobs);
+  for(const j of jobs){
+    if(j.status!=='draft' && j.status!=='queued'){ await pullLog(j.id); }
+  }
+}
+
+async function pullLog(id){
+  const off = logOffsets[id]||0;
+  try{
+    const r = await fetch(`/api/jobs/${id}/log?after=${off}`);
+    const d = await r.json();
+    if(d.lines && d.lines.length){
+      logText[id] = (logText[id]||'') + d.lines.join('\n') + '\n';
+      logOffsets[id] = d.count;
+      const el = $(`#log-${id}`);
+      if(el){ el.textContent = logText[id]; el.scrollTop = el.scrollHeight; }
+    }
+  }catch(e){}
+}
+
+function renderStats(jobs){
+  const c = {all:jobs.length, run:0, wait:0, done:0};
+  for(const j of jobs){
+    if(j.status==='running') c.run++;
+    else if(j.status==='draft'||j.status==='queued') c.wait++;
+    else if(j.status==='done') c.done++;
+  }
+  $('#st-all').textContent=c.all; $('#st-run').textContent=c.run;
+  $('#st-wait').textContent=c.wait; $('#st-done').textContent=c.done;
+  const badge = $('#nav-badge');
+  if(c.run>0){ badge.style.display='flex'; badge.textContent=c.run; } else { badge.style.display='none'; }
+}
+
+/* 阶段步进器 */
+function stepper(j){
+  const order = j.ocr ? ['render','ocr','enhance','rebuild','done'] : ['render','enhance','rebuild','done'];
+  let s = j.stage; if(s==='init') s='render';
+  let idx = order.indexOf(s);
+  const running = j.status==='running';
+  let html='';
+  order.forEach((k,i)=>{
+    const done = (j.status==='done') || (idx>=0 && i<idx);
+    const active = running && i===idx;
+    if(i>0) html += `<span class="step-line ${done?'done':''}"></span>`;
+    html += `<span class="step ${done?'done':''} ${active?'active':''}">
+      <span class="dot2">${done?'✓':i+1}</span>${STAGE_LABEL[k]}</span>`;
+  });
+  return `<div class="steps">${html}</div>`;
+}
+
+function val(id, key, job){
+  if(pv[id] && pv[id][key]!==undefined) return pv[id][key];
+  return job[key];
+}
+function setv(id, key, v){ (pv[id]=pv[id]||{})[key]=v; }
+
+function fieldHTML(id, job, key, label, type, options){
+  const v = val(id,key,job);
+  let inner;
+  if(type==='select'){
+    inner = `<select data-k="${key}" data-id="${id}">` +
+      options.map(o=>`<option value="${o.v}" ${String(v)===String(o.v)?'selected':''}>${o.t}</option>`).join('') + `</select>`;
+  } else if(type==='check'){
+    inner = `<select data-k="${key}" data-id="${id}">
+      <option value="true" ${v?'selected':''}>开</option>
+      <option value="false" ${!v?'selected':''}>关</option></select>`;
+  } else {
+    inner = `<input type="${type}" data-k="${key}" data-id="${id}" value="${v===null||v===undefined?'':v}">`;
+  }
+  return `<div class="field"><label>${label}</label>${inner}</div>`;
+}
+
+function paramGridHTML(id, job){
+  const pk = job.page_start||0, cnt = job.total_pages||0;
+  const endDefault = cnt ? (pk+cnt) : '';
+  const startDefault = pk+1;
+  return `
+  <div class="param-grid">
+    <div class="field"><label>起始页</label><input type="number" min="1" data-k="pstart" data-id="${id}" value="${(pv[id]&&pv[id].pstart)||startDefault}"></div>
+    <div class="field"><label>结束页（空=到末尾）</label><input type="number" min="1" data-k="pend" data-id="${id}" value="${(pv[id]&&pv[id].pend)||endDefault}"></div>
+    ${fieldHTML(id,job,'scale','超分倍数','select',[{v:2,t:'×2'},{v:4,t:'×4'},{v:1,t:'×1（不放大）'}])}
+    ${fieldHTML(id,job,'quality','JPEG 质量','number')}
+  </div>
+  <details class="adv">
+    <summary>高级参数</summary>
+    <div class="param-grid">
+      ${fieldHTML(id,job,'restore_enabled','文档修复 (DocRes)','check')}
+      ${fieldHTML(id,job,'restore_backend','修复后端','select',[{v:'docres',t:'docres'},{v:'none',t:'none'}])}
+      ${fieldHTML(id,job,'sr_enabled','超分 (SR)','check')}
+      ${fieldHTML(id,job,'sr_backend','超分后端','select',[{v:'realesrgan-general',t:'realesrgan-general'},{v:'swinir',t:'swinir'},{v:'none',t:'none'}])}
+      ${fieldHTML(id,job,'routing','混合路由','select',[{v:'off',t:'单一后端'},{v:'by-type',t:'按页类型混合'}])}
+      ${fieldHTML(id,job,'dpi','渲染 DPI','text')}
+      ${fieldHTML(id,job,'device','计算设备','select',[{v:'auto',t:'auto'},{v:'cuda',t:'cuda (GPU)'},{v:'cpu',t:'cpu'}])}
+      ${fieldHTML(id,job,'monochrome','黑白编码','select',[{v:'1bit',t:'1bit'},{v:'jbig2',t:'jbig2'}])}
+      ${fieldHTML(id,job,'fp16','fp16 半精度','check')}
+      ${fieldHTML(id,job,'ocr','内置 OCR 文字层','check')}
+    </div>
+  </details>`;
+}
+
+function jobCard(j){
+  const pct = Math.round((j.progress||0)*100);
+  const canStart = (j.status==='draft'||j.status==='queued');
+  const r = j.result;
+  return `
+    <div class="job-head">
+      <span class="job-name">${esc(j.name)}</span>
+      <span class="badge ${j.status}">${statusText[j.status]||j.status}</span>
+      ${j.total_pages?`<span class="badge" style="background:var(--panel-2);color:var(--muted)">${j.total_pages} 页</span>`:''}
+    </div>
+    ${stepper(j)}
+    <div class="progress"><div class="bar" style="width:${pct}%"></div></div>
+    <div class="job-meta">
+      <span>${j.total_pages?`进度 ${j.current_page}/${j.total_pages} 页`:'等待开始'} · ${pct}%</span>
+      <span>SR×${j.scale} · q${j.quality} · 修复=${j.restore_enabled?j.restore_backend:'关'} · 路由=${j.routing}</span>
+    </div>
+    ${paramGridHTML(j.id, j)}
+    ${r?`<div class="result"><div class="grid">
+        <span>体积 <b>${fmtMB(r.in_size)}</b> → <b class="${r.out_size<r.in_size?'down':''}">${fmtMB(r.out_size)}</b></span>
+        <span>耗时 <b>${fmtTime(r.elapsed)}</b></span>
+        <span>输出 <b>${esc(r.out_name)}</b></span>
+      </div></div>`:''}
+    ${j.error?`<div class="result" style="background:var(--err-soft);border-color:#fecaca;color:var(--err)">错误：${esc(j.error)}</div>`:''}
+    <div class="controls">
+      ${canStart?`<button class="btn primary sm" onclick="startJob('${j.id}')">开始</button>`:''}
+      ${j.status==='running'?`<button class="btn danger sm" onclick="stopJob('${j.id}')">停止</button>`:''}
+      ${j.status!=='running'?`<button class="btn sm" onclick="removeJob('${j.id}')">移除</button>`:''}
+      ${r?`<button class="btn sm" onclick="openOut('${j.id}')">打开文件</button>
+           <button class="btn sm" onclick="openOut('${j.id}',1)">定位</button>
+           <button class="btn ghost sm" onclick="gotoCompare('${j.id}')">对比</button>`:''}
+      <button class="btn ghost sm" onclick="toggleLog('${j.id}')">日志</button>
+    </div>
+    <div class="log" id="log-${j.id}"></div>`;
+}
+
+/* 增量渲染，避免轮询打断输入 */
+function renderJobs(jobs){
+  lastJobs = {};
+  jobs.forEach(j=>{ lastJobs[j.id] = j; });
+  const present = jobs.map(j=>j.id);
+  [...jobsEl.children].forEach(ch=>{ if(ch.dataset.id && !present.includes(ch.dataset.id)) ch.remove(); });
+  let prev = null;
+  for(const j of jobs){
+    const sig = [j.status,j.stage,Math.round((j.progress||0)*100),j.current_page,j.total_pages,j.result?1:0,j.error||'',logText[j.id]?logText[j.id].length:0].join('|');
+    let el = document.getElementById('job-'+j.id);
+    if(!el){
+      el = document.createElement('div'); el.id='job-'+j.id; el.className='job'+(j.status==='running'?' running':''); el.dataset.id=j.id;
+      el.innerHTML = jobCard(j); sigs[j.id]=sig; jobsEl.appendChild(el); restoreLog(j.id);
+    } else if(sigs[j.id]!==sig){
+      sigs[j.id]=sig; el.className='job'+(j.status==='running'?' running':''); el.innerHTML=jobCard(j); restoreLog(j.id);
+    }
+    if(prev){ if(prev.nextElementSibling!==el) prev.after(el); } else if(jobsEl.firstElementChild!==el){ jobsEl.prepend(el); }
+    prev = el;
+  }
+  $('#jobs-empty').style.display = jobs.length? 'none':'block';
+}
+function restoreLog(id){ const el=$( `#log-${id}`); if(el && logText[id]) el.textContent = logText[id]; }
+
+/* 参数变更 -> 记录到 pv */
+jobsEl.addEventListener('change', onParamChange);
+jobsEl.addEventListener('input', onParamChange);
+function onParamChange(e){
+  const t = e.target;
+  if(!t.dataset || !t.dataset.id) return;
+  const id = t.dataset.id, k = t.dataset.k;
+  let v = t.value;
+  if(t.type==='number') v = v===''? null : parseInt(v);
+  if(k==='restore_enabled'||k==='sr_enabled'||k==='fp16'||k==='ocr') v = (t.value==='true');
+  setv(id,k,v);
+}
+
+/* ---------------- 动作 ---------------- */
+async function startJob(id){
+  const body = Object.assign({}, collectParams(id), {pdf_path: pdfPathOf(id), start:true});
+  // 用参数重建任务：先移除旧 draft，再新建并启动
+  await fetch(`/api/jobs/${id}/remove`,{method:'POST'}).catch(()=>{});
+  await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  delete pv[id]; delete sigs[id]; delete logText[id]; delete logOffsets[id];
+  refresh();
+}
+function collectParams(id){
+  const o = {};
+  const job = lastJobs[id];
+  const g = (k)=>{ if(pv[id] && pv[id][k]!==undefined) return pv[id][k]; return job? job[k] : undefined; };
+  o.scale = parseInt(g('scale')||2);
+  o.quality = parseInt(g('quality')||85);
+  o.ocr = !!g('ocr');
+  o.restore_enabled = !!g('restore_enabled');
+  o.restore_backend = g('restore_backend')||'docres';
+  o.sr_enabled = !!g('sr_enabled');
+  o.sr_backend = g('sr_backend')||'realesrgan-general';
+  o.routing = g('routing')||'off';
+  o.dpi = g('dpi')||'auto';
+  o.device = g('device')||'auto';
+  o.monochrome = g('monochrome')||'1bit';
+  o.fp16 = g('fp16')!==false;
+  const ps = pv[id] ? pv[id].pstart : undefined;
+  const pe = pv[id] ? pv[id].pend : undefined;
+  const s = (ps===undefined||ps===null) ? 0 : ps-1;
+  const e = (pe===undefined||pe===null) ? null : pe-1;
+  if(!(s===0 && e===null)) o.pages = [s, e];
+  return o;
+}
+function pdfPathOf(id){ const j=lastJobs[id]; return j? j.pdf_path : ''; }
+
+async function stopJob(id){ await fetch(`/api/jobs/${id}/stop`,{method:'POST'}); toast('已请求停止'); refresh(); }
+async function removeJob(id){
+  const r = await fetch(`/api/jobs/${id}/remove`,{method:'POST'});
+  if(!r.ok){ const j=await r.json(); toast(j.error||'移除失败','err'); }
+  delete pv[id]; delete sigs[id]; delete logText[id]; delete logOffsets[id];
+  refresh();
+}
+function toggleLog(id){ const el=$(`#log-${id}`); if(el) el.classList.toggle('show'); }
+function openOut(id, reveal){
+  const j = lastJobs[id]; if(!j||!j.result) return;
+  fetch(`/api/open?path=${encodeURIComponent(j.result.out_path)}${reveal?'&mode=reveal':''}`);
+}
+
+$('#btn-start-all').addEventListener('click', async ()=>{ await fetch('/api/jobs/start-all',{method:'POST'}); toast('已开始全部任务','ok'); refresh(); });
+$('#btn-stop-all').addEventListener('click', async ()=>{
+  const ids = Object.keys(lastJobs).filter(id=>['draft','queued','running'].includes(lastJobs[id].status));
+  for(const id of ids){ await fetch(`/api/jobs/${id}/stop`,{method:'POST'}); }
+  toast('已请求停止全部'); refresh();
+});
+$('#btn-clear').addEventListener('click', async ()=>{ await fetch('/api/jobs/clear-finished',{method:'POST'}); toast('已清空已完成'); refresh(); });
+$('#btn-open-out').addEventListener('click', ()=>{ fetch('/api/open?path='+encodeURIComponent($('#about-out').dataset.root||'')); });
+
+/* ---------------- 对比查看 ---------------- */
+const stage = $('#cmp-stage');
+let dragging = false;
+stage.addEventListener('pointerdown', e=>{ dragging=true; try{stage.setPointerCapture(e.pointerId);}catch(x){} moveHandle(e); });
+stage.addEventListener('pointermove', e=>{ if(dragging) moveHandle(e); });
+stage.addEventListener('pointerup', ()=>{ dragging=false; });
+stage.addEventListener('pointercancel', ()=>{ dragging=false; });
+function moveHandle(e){
+  const r = stage.getBoundingClientRect();
+  let x = (e.clientX - r.left)/r.width; x = Math.max(0,Math.min(1,x));
+  stage.style.setProperty('--pos', (x*100)+'%');
+}
+
+let cmpZoom = 1;
+function applyZoom(){ stage.style.setProperty('--zw', (cmpZoom*100)+'%'); $('#cmp-zoom-val').textContent = Math.round(cmpZoom*100)+'%'; }
+$('#cmp-zoom-in').addEventListener('click', ()=>{ cmpZoom=Math.min(4,cmpZoom+0.25); applyZoom(); });
+$('#cmp-zoom-out').addEventListener('click', ()=>{ cmpZoom=Math.max(0.5,cmpZoom-0.25); applyZoom(); });
+
+function refreshCompareJobs(){
+  const sel = $('#cmp-job');
+  const done = Object.values(lastJobs).filter(j=>j.status==='done' && j.result);
+  sel.innerHTML = done.length? done.map(j=>`<option value="${j.id}">${esc(j.name)}</option>`).join('') : '<option value="">（暂无已完成任务）</option>';
+}
+function gotoCompare(id){
+  document.querySelector('.nav-item[data-view="compare"]').click();
+  refreshCompareJobs();
+  if(lastJobs[id] && lastJobs[id].status==='done'){ $('#cmp-job').value = id; loadCompare(); }
+}
+$('#cmp-load').addEventListener('click', loadCompare);
+$('#cmp-job').addEventListener('change', ()=>{ const j=lastJobs[$('#cmp-job').value]; if(j && j.result){ $('#cmp-page').max=j.total_pages; } });
+
+async function loadCompare(){
+  const id = $('#cmp-job').value;
+  if(!id){ toast('没有可对比的任务','err'); return; }
+  const page = parseInt($('#cmp-page').value)||1;
+  $('#cmp-empty').style.display='none';
+  toast('生成对比图中…');
+  try{
+    const r = await fetch(`/api/compare?job=${id}&page=${page}&width=1500`);
+    const d = await r.json();
+    if(d.error){ toast(d.error,'err'); return; }
+    cmpHolder = {orig:d.orig, enh:d.enh, name:d.name, page:d.page};
+    $('#cmp-img-orig').src = d.orig;
+    $('#cmp-img-enh').src = d.enh;
+    $('#cmp-page').max = d.count;
+    stage.style.setProperty('--pos','50%');
+  }catch(e){ toast('加载失败','err'); }
+}
+$('#cmp-download').addEventListener('click', async ()=>{
+  if(!cmpHolder.orig){ toast('先加载对比图','err'); return; }
+  const a = new Image(), b = new Image();
+  const load = (img,src)=>new Promise(res=>{ img.onload=res; img.onerror=res; img.src=src; });
+  await Promise.all([load(a,cmpHolder.orig), load(b,cmpHolder.enh)]);
+  const gap = 24, top = 46;
+  const w = a.width + b.width + gap, h = Math.max(a.height,b.height) + top;
+  const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
+  ctx.font='bold 24px "Microsoft YaHei",sans-serif'; ctx.fillStyle='#111827';
+  ctx.fillText('原书 第'+cmpHolder.page+'页', 20, 32);
+  ctx.fillText('增强', a.width+gap+20, 32);
+  ctx.drawImage(a, 0, top); ctx.drawImage(b, a.width+gap, top);
+  const url = cv.toDataURL('image/png');
+  const link = document.createElement('a');
+  link.href = url; link.download = `compare_${cmpHolder.name}_p${cmpHolder.page}.png`; link.click();
+  toast('已下载对比图','ok');
+});
+
+/* ---------------- 设置页 ---------------- */
+function settingsGridHTML(){
+  return `
+    ${selField('scale','超分倍数',[{v:2,t:'×2'},{v:4,t:'×4'},{v:1,t:'×1'}] , settings.scale)}
+    ${numField('quality','JPEG 质量', settings.quality)}
+    ${selField('restore_enabled','文档修复 (DocRes)',[{v:true,t:'开'},{v:false,t:'关'}], settings.restore_enabled)}
+    ${selField('restore_backend','修复后端',[{v:'docres',t:'docres'},{v:'none',t:'none'}], settings.restore_backend)}
+    ${selField('sr_enabled','超分 (SR)',[{v:true,t:'开'},{v:false,t:'关'}], settings.sr_enabled)}
+    ${selField('sr_backend','超分后端',[{v:'realesrgan-general',t:'realesrgan-general'},{v:'swinir',t:'swinir'},{v:'none',t:'none'}], settings.sr_backend)}
+    ${selField('routing','混合路由',[{v:'off',t:'单一后端'},{v:'by-type',t:'按页类型混合'}], settings.routing)}
+    ${txtField('dpi','渲染 DPI（auto 或数字）', settings.dpi)}
+    ${selField('device','计算设备',[{v:'auto',t:'auto'},{v:'cuda',t:'cuda (GPU)'},{v:'cpu',t:'cpu'}], settings.device)}
+    ${selField('monochrome','黑白编码',[{v:'1bit',t:'1bit'},{v:'jbig2',t:'jbig2'}], settings.monochrome)}
+    ${selField('fp16','fp16 半精度',[{v:true,t:'开'},{v:false,t:'关'}], settings.fp16)}
+    ${selField('ocr','内置 OCR 文字层',[{v:false,t:'关（交给 FineReader）'},{v:true,t:'开'}], settings.ocr)}
+  `;
+}
+function selField(k,label,opts,cur){
+  return `<div class="field"><label>${label}</label><select data-set="${k}">`+
+    opts.map(o=>`<option value="${o.v}" ${String(cur)===String(o.v)?'selected':''}>${o.t}</option>`).join('')+`</select></div>`;
+}
+function numField(k,label,cur){ return `<div class="field"><label>${label}</label><input type="number" data-set="${k}" value="${cur}"></div>`; }
+function txtField(k,label,cur){ return `<div class="field"><label>${label}</label><input type="text" data-set="${k}" value="${cur}"></div>`; }
+
+function renderSettings(){
+  $('#settings-grid').innerHTML = settingsGridHTML();
+  $('#settings-grid').querySelectorAll('[data-set]').forEach(el=>{
+    el.addEventListener('change', ()=>{
+      const k = el.dataset.set; let v = el.value;
+      if(el.type==='number') v = parseInt(v);
+      if(v==='true') v=true; else if(v==='false') v=false;
+      settings[k]=v; saveStore();
+    });
+  });
+}
+$('#btn-save-settings').addEventListener('click', ()=>{ saveStore(); toast('已保存为默认','ok'); });
+$('#btn-reset-settings').addEventListener('click', ()=>{ settings=Object.assign({},defaults); saveStore(); renderSettings(); toast('已恢复默认'); });
+
+async function loadBackends(){
+  try{
+    const r = await fetch('/api/config'); const d = await r.json();
+    $('#ver-text').textContent = 'v'+(d.version||'0.2')+' · 本地运行';
+    $('#about-ver').textContent = 'v'+(d.version||'0.2');
+    $('#about-out').textContent = d.root ? d.root+'\\output' : 'output/';
+    $('#about-out').dataset.root = (d.root||'')+'\\output';
+    if(d.defaults){ defaults = Object.assign({}, d.defaults); }
+    const b = d.backends||{};
+    $('#backends-info').innerHTML =
+      `<p>修复后端：<code>${(b.restore||[]).join('</code> <code>')||'—'}</code></p>`+
+      `<p>超分后端：<code>${(b.sr||[]).join('</code> <code>')||'—'}</code></p>`;
+  }catch(e){}
+}
+
+/* ---------------- 工具函数 ---------------- */
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtMB(b){ return (b/1024/1024).toFixed(1)+' MB'; }
+function fmtTime(s){ return s>=60 ? (s/60).toFixed(1)+' 分钟' : s.toFixed(0)+' 秒'; }
+
+/* 缓存最近一次任务列表，供事件处理使用 */
+let lastJobs = {};
+
+/* ---------------- 启动 ---------------- */
+renderSettings();
+loadBackends();
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
