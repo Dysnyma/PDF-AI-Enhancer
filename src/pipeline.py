@@ -290,10 +290,12 @@ class EnhancePipeline:
         mono = cfg["compression"].get("monochrome", "1bit")
         bg_scale = cfg["compression"].get("mrc_bg_scale", "auto")
         bg_denoise = cfg["compression"].get("mrc_bg_denoise", "auto")
+        enc_workers = cfg["compression"].get("encode_workers", "auto")
         jbig2_bin = os.path.join(self.project_root, "tools", "jbig2", "jbig2.exe")
         text_layers = SpansView(ocr_store) if ocr_store is not None else None
-        log.info("rebuild: encoding %d pages [quality=%d monochrome=%s bg_scale=%s bg_denoise=%s] -> %s",
-                 len(out_pages), q, mono, bg_scale, bg_denoise,
+        log.info("rebuild: encoding %d pages [quality=%d monochrome=%s bg_scale=%s "
+                 "bg_denoise=%s workers=%s] -> %s",
+                 len(out_pages), q, mono, bg_scale, bg_denoise, enc_workers,
                  os.path.basename(out_path))
         # jbig2_bin is handed to rebuild_pdf unconditionally: MRC's text
         # segmentation (leptonica adaptive threshold) needs it regardless of
@@ -305,7 +307,8 @@ class EnhancePipeline:
                     monochrome=mono,
                     mrc_bg_scale=bg_scale,
                     mrc_bg_denoise=bg_denoise,
-                    jbig2_bin=jbig2_bin)
+                    jbig2_bin=jbig2_bin,
+                    encode_workers=enc_workers)
 
         if save_images_dir:
             os.makedirs(save_images_dir, exist_ok=True)

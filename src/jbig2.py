@@ -59,8 +59,12 @@ def encode_jbig2(img_gray: np.ndarray, jbig2_bin: str,
     page stream with the jbig2enc custom header stripped.
     """
     bw = binarize(img_gray)
-    png_path = os.path.abspath(os.path.join(workdir, "page_bw.png"))
-    base = os.path.abspath(os.path.join(workdir, "page"))
+    # pid-tagged scratch names: with the encoder running in a process pool
+    # every worker needs its own files, and jbig2enc derives <base>.sym /
+    # <base>.0000 from the names below.
+    tag = os.getpid()
+    png_path = os.path.abspath(os.path.join(workdir, f"_jbig2_bw_{tag}.png"))
+    base = os.path.abspath(os.path.join(workdir, f"_jbig2_{tag}"))
     # Unicode-safe write: the workdir derives from the book name, and
     # cv2.imwrite cannot open non-ASCII paths on Windows.
     imwrite_unicode(png_path, bw)
@@ -84,6 +88,11 @@ def encode_jbig2(img_gray: np.ndarray, jbig2_bin: str,
     jb2_bytes = page_data[JBIG2_HEADER_LEN:]
     width, height, _, _ = struct.unpack(
         ">IIII", page_data[11:JBIG2_HEADER_LEN])
+    for f in (png_path, sym_path, page_path):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
     return sym_bytes, jb2_bytes, width, height
 
 

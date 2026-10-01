@@ -70,6 +70,12 @@ compression:
                       # 背景 869KB→384KB），纸面反而更干净；7px 仅占 2878px 页宽的
                       # 0.24%，渐变与大插图不受影响。
                       # auto: gray-text→5（纯纸面），mixed/color-text→0（保插图）。
+  encode_workers: auto
+                      # 逐页编码的并行进程数：auto（= 逻辑核数一半）| 1（串行）
+                      # 编码是逐页独立且纯 CPU 的（MRC 分割约 8s/页），实测占整本
+                      # 重建时间的大头：旧全本 104 min 里重建 45.5 min，而 GPU 增强
+                      # 只有 19 min。改为多进程后重建时间按核数下降。
+                      # 页图以内存数组传入时（脚本单页演示）自动串行——避免 pickle。
 
 gpu:
   device: auto        # auto | cuda | cpu

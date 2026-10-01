@@ -26,6 +26,7 @@ Encoding: classic MRC stencil structure —
   foreground: N x [1-bit /ImageMask (PyMuPDF Flate) + per-group fill]
   Paint polarity verified empirically: ink bits = 0 + /Decode [0 1].
 """
+import glob
 import logging
 import os
 import subprocess
@@ -104,20 +105,27 @@ def _threshold_mask(gray: np.ndarray, jbig2_bin: str | None,
 
 
 def cleanup_threshold_files(workdir: str | None) -> None:
-    """Drop the pid-stable scratch PNGs written by _threshold_mask.
+    """Drop the scratch PNGs written by _threshold_mask / encode_jbig2.
 
-    Called once per document from rebuild_pdf, so a long book issues two
-    deletions instead of two per page.
+    Called once per document from rebuild_pdf. The names are pid-tagged so
+    concurrent worker processes do not collide, which means the set to clean
+    is only known by globbing — only these exact prefixes are touched, and
+    never a recursive delete.
     """
     if not workdir:
         return
-    for name in (f"_mrc_in_{os.getpid()}.png", f"_mrc_thr_{os.getpid()}.png"):
-        p = os.path.join(workdir, name)
-        try:
-            if os.path.isfile(p):
+    patterns = ("_mrc_in_*.png", "_mrc_thr_*.png", "_jbig2_bw_*.png",
+                "_jbig2_*.sym", "_jbig2_*.0000")
+    removed = 0
+    for pat in patterns:
+        for p in glob.glob(os.path.join(glob.escape(workdir), pat)):
+            try:
                 os.remove(p)
-        except OSError:
-            pass
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        log.debug("cleaned %d encoder scratch file(s) in %s", removed, workdir)
 
 
 def _large_dark_blobs(gray: np.ndarray) -> np.ndarray:

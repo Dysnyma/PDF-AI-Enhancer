@@ -200,18 +200,142 @@ def _replace_with_retry(src: str, dst: str, attempts: int = 6) -> bool:
     return False
 
 
+def _mrc_plane_params(ptype: str, mrc_bg_scale, mrc_bg_denoise):
+    """Resolve the "auto" MRC background settings for one page type."""
+    scale = 2 if mrc_bg_scale == "auto" else int(mrc_bg_scale)
+    if mrc_bg_denoise == "auto":
+        denoise = 5 if ptype == "gray-text" else 0
+    else:
+        denoise = int(mrc_bg_denoise)
+    return scale, denoise
+
+
+def encode_page_payload(img, ptype: str, *, jpeg_quality: int,
+                        monochrome: str, mrc_bg_scale, mrc_bg_denoise,
+                        jbig2_bin, workdir: str):
+    """Encode one enhanced page into a small, picklable payload.
+
+    This is the slow half of rebuilding: MRC segmentation alone is ~8 s per
+    page, which made the rebuild of a 340-page book 45 minutes of
+    single-threaded CPU — 44% of the whole run, more than the GPU stages put
+    together. It is a pure function of (page image, encoding settings), so
+    returning a payload instead of embedding straight into a MuPDF page lets
+    the caller run it in a process pool while the MuPDF side stays serial
+    (a fitz Document is not safe to touch from several processes).
+
+    Payloads:
+      ("1bit",  png_bytes)
+      ("jbig2", sym_bytes, jb2_bytes, w, h)
+      ("jpeg",  jpg_bytes)
+      ("mrc",   bg_jpg, [(packed, fill), ...], h, w)
+    """
+    if ptype == "bw-text":
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if monochrome == "jbig2" and jbig2_bin and os.path.isfile(jbig2_bin):
+            try:
+                from src.jbig2 import encode_jbig2
+                sym, jb2, w, h = encode_jbig2(gray, jbig2_bin, workdir)
+                return ("jbig2", sym, jb2, w, h)
+            except Exception as e:
+                log.warning("jbig2 encode failed (%s); using 1-bit", e)
+        from src.jbig2 import encode_1bit
+        return ("1bit", encode_1bit(gray))
+
+    if ptype in ("mixed", "color-text", "gray-text"):
+        # Dual-encode and keep the smaller: MRC layered (JPEG background with
+        # text whitened + per-colour 1-bit stencils over glyph strokes) wins
+        # on text-heavy pages; whole-page JPEG wins when the figure dominates
+        # or the page carries no meaningful text. Stencils are compared at
+        # their Flate-compressed size (raw packing is ~5.6 MB/page each,
+        # zlib ~0.3 MB).
+        from src.mrc import encode_mrc
+        scale, denoise = _mrc_plane_params(ptype, mrc_bg_scale, mrc_bg_denoise)
+        mrc = encode_mrc(img, jpeg_quality, bg_gray=(ptype == "gray-text"),
+                         jbig2_bin=jbig2_bin, workdir=workdir,
+                         bg_scale=scale, bg_denoise=denoise)
+        jpg = encode_page_image(img, ptype, jpeg_quality)
+        if mrc[0] is not None and mrc[1]:
+            z_est = sum(len(zlib.compress(pk, 6)) for pk, _ in mrc[1])
+            if len(mrc[0]) + z_est < len(jpg):
+                bg_jpg, layers, mh, mw = mrc
+                return ("mrc", bg_jpg, layers, mh, mw)
+        return ("jpeg", jpg)
+
+    return ("jpeg", encode_page_image(img, ptype, jpeg_quality))
+
+
+def embed_page_payload(page, payload):
+    """Install an encoded payload on a MuPDF page. Serial and cheap."""
+    kind = payload[0]
+    if kind == "1bit":
+        page.insert_image(page.rect, stream=payload[1])
+    elif kind == "jbig2":
+        from src.jbig2 import embed_jbig2
+        embed_jbig2(page, payload[1], payload[2], payload[3], payload[4],
+                    page.rect)
+    elif kind == "jpeg":
+        page.insert_image(page.rect, stream=payload[1])
+    else:  # mrc
+        from src.mrc import embed_mrc
+        embed_mrc(page, payload[1], payload[2], payload[3], payload[4])
+
+
+_ENC_OPTS: dict | None = None
+
+
+def _enc_init(opts: dict):
+    """Process-pool initializer: stash the (picklable) encoding settings.
+
+    Also pins OpenCV to a single thread per worker. Measured effect on the
+    real book: none (0.81 -> 0.80 s/page at 8 workers), so this is hygiene
+    rather than an optimisation — it just keeps N workers from each starting
+    their own thread pool.
+    """
+    global _ENC_OPTS
+    _ENC_OPTS = opts
+    try:
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+
+
+def _enc_worker(spec):
+    """Encode one page inside a worker process. `spec` = (image_path, ptype)."""
+    image_path, ptype = spec
+    img = imread_unicode(image_path)
+    if img is None:
+        raise RuntimeError(f"cannot read page image {image_path}")
+    try:
+        return encode_page_payload(img, ptype, **_ENC_OPTS)
+    finally:
+        del img
+
+
+def resolve_encode_workers(encode_workers) -> int:
+    """ "auto" -> half the logical CPUs (the encoder is a mix of a jbig2enc
+    subprocess, OpenCV and numpy, so leaving headroom helps)."""
+    if encode_workers in (None, "auto"):
+        return max(1, (os.cpu_count() or 4) // 2)
+    return max(1, int(encode_workers))
+
+
 def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
                 text_layers: dict[int, list[dict]] | None = None,
                 font_file: str | None = None,
                 monochrome: str = "1bit",
                 jbig2_bin: str | None = None,
-                mrc_bg_scale="auto", mrc_bg_denoise="auto"):
+                mrc_bg_scale="auto", mrc_bg_denoise="auto",
+                encode_workers="auto"):
     """Build a new PDF from processed page images.
 
     pages: list of dicts with keys width_pt, height_pt, ptype and EITHER
       image (BGR ndarray) OR image_path (a file to load it from). The path
       form lets the pipeline rebuild a checkpointed book one page at a time
       instead of holding every enhanced page in memory at once.
+    encode_workers: number of processes used to encode pages, or "auto".
+      Encoding is per-page independent and CPU-bound, so this is where a
+      long book spends most of its rebuild time. Pages given as in-memory
+      arrays are always encoded in-process (they would have to be pickled).
     monochrome: "1bit" (default) or "jbig2" — encoding for bw-text pages.
       jbig2 is EXPERIMENTAL: PyMuPDF strips the /JBIG2Decode filter on save
       (MuPDF has no JBIG2 support), which corrupts the page (renders all
@@ -232,69 +356,52 @@ def rebuild_pdf(pages, out_path: str, jpeg_quality: int = 85,
     Physical page size is preserved, so effective DPI rises with SR.
     """
     from src.ocr import insert_hidden_text_layer
-    from src.jbig2 import encode_1bit, encode_jbig2, embed_jbig2
 
-    doc = fitz.open()
     workdir = os.path.dirname(out_path)
-    for p in pages:
-        ptype = p.get("ptype", "color")
-        img = p.get("image")
-        if img is None:
-            img = imread_unicode(p["image_path"])
+    pages = list(pages)
+    opts = dict(jpeg_quality=jpeg_quality, monochrome=monochrome,
+                mrc_bg_scale=mrc_bg_scale, mrc_bg_denoise=mrc_bg_denoise,
+                jbig2_bin=jbig2_bin, workdir=workdir)
+
+    # --- encode (parallel when every page lives on disk) ---
+    workers = resolve_encode_workers(encode_workers)
+    file_backed = all(p.get("image") is None and p.get("image_path")
+                      for p in pages)
+    payloads = None
+    if file_backed and len(pages) > 1 and workers > 1:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            specs = [(p["image_path"], p.get("ptype", "color")) for p in pages]
+            t_enc = time.time()
+            with ProcessPoolExecutor(max_workers=workers,
+                                     initializer=_enc_init,
+                                     initargs=(opts,)) as ex:
+                payloads = list(ex.map(_enc_worker, specs, chunksize=2))
+            log.info("encoded %d pages on %d workers in %.1fs",
+                     len(pages), workers, time.time() - t_enc)
+        except Exception as e:
+            log.warning("parallel encode unavailable (%s); encoding serially", e)
+            payloads = None
+    if payloads is None:
+        payloads = []
+        for p in pages:
+            img = p.get("image")
             if img is None:
-                raise RuntimeError(f"cannot read page image {p['image_path']}")
+                img = imread_unicode(p["image_path"])
+                if img is None:
+                    raise RuntimeError(f"cannot read page image {p['image_path']}")
+            payloads.append(encode_page_payload(
+                img, p.get("ptype", "color"), **opts))
+            del img
+
+    # --- embed (MuPDF is single-threaded here) ---
+    doc = fitz.open()
+    for p, payload in zip(pages, payloads):
         page = doc.new_page(width=p["width_pt"], height=p["height_pt"])
-
-        if ptype == "bw-text":
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            if monochrome == "jbig2" and jbig2_bin and os.path.isfile(jbig2_bin):
-                try:
-                    sym, jb2, w, h = encode_jbig2(gray, jbig2_bin, workdir)
-                    embed_jbig2(page, sym, jb2, w, h, page.rect)
-                except Exception as e:
-                    log.warning("jbig2 encode failed (%s); using 1-bit", e)
-                    png = encode_1bit(gray)
-                    page.insert_image(page.rect, stream=png)
-            else:
-                png = encode_1bit(gray)
-                page.insert_image(page.rect, stream=png)
-        elif ptype in ("mixed", "color-text", "gray-text"):
-            # Dual-encode and keep the smaller: MRC layered (JPEG background
-            # with text whitened + per-color 1-bit stencils over glyph
-            # strokes) wins on text-heavy pages; whole-page JPEG wins when
-            # the figure dominates (background saving < stencil cost) or
-            # when the page carries no meaningful text at all. Stencils are
-            # compared at their Flate-compressed size (raw packing is
-            # ~5.6 MB/page each; zlib ~0.3 MB).
-            from src.mrc import encode_mrc, embed_mrc
-            scale = mrc_bg_scale
-            if scale == "auto":
-                scale = 2
-            denoise = mrc_bg_denoise
-            if denoise == "auto":
-                denoise = 5 if ptype == "gray-text" else 0
-            mrc = encode_mrc(img, jpeg_quality,
-                             bg_gray=(ptype == "gray-text"),
-                             jbig2_bin=jbig2_bin, workdir=workdir,
-                             bg_scale=int(scale), bg_denoise=int(denoise))
-            jpg = encode_page_image(img, ptype, jpeg_quality)
-            if mrc[0] is not None and mrc[1]:
-                z_est = sum(len(zlib.compress(pk, 6)) for pk, _ in mrc[1])
-                if len(mrc[0]) + z_est < len(jpg):
-                    bg_jpg, layers, mh, mw = mrc
-                    embed_mrc(page, bg_jpg, layers, mh, mw)
-                else:
-                    page.insert_image(page.rect, stream=jpg)
-            else:
-                page.insert_image(page.rect, stream=jpg)
-        else:
-            jpg = encode_page_image(img, ptype, jpeg_quality)
-            page.insert_image(page.rect, stream=jpg)
-
+        embed_page_payload(page, payload)
         if text_layers and p["index"] in text_layers:
             insert_hidden_text_layer(page, text_layers[p["index"]], font_file)
-
-        del img  # release the page array before rendering the next one
+        del payload
 
     doc.save(out_path, deflate=True, garbage=3)
     doc.close()
